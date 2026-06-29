@@ -16,9 +16,9 @@ from config.robot_config import ROBOT_IP
 
 
 class CylindricalScanPlanner:
-    """Generate wrist-safe cylindrical scan waypoints across Z layers."""
+    """Generate cylindrical scan waypoints with outer-ring transition routing."""
 
-    def __init__(self, centre, radius, height, lift_off, theta_step_deg, z_step, z_start=None, z_end=None, scan_points_per_z=12, z_scans=5, theta_start_deg=180.0):
+    def __init__(self, centre, radius, height, lift_off, theta_step_deg, z_step, z_start=None, z_end=None, scan_points_per_z=12, z_scans=5, theta_start_deg=180.0, outer_offset_mm=10.0):
         """Store scan geometry and sampling parameters."""
         self.centre = [float(c) for c in centre]
         self.radius = float(radius)
@@ -31,6 +31,7 @@ class CylindricalScanPlanner:
         self.scan_points_per_z = max(2, int(scan_points_per_z))
         self.z_scans = max(1, int(z_scans))
         self.theta_start_deg = float(theta_start_deg)
+        self.outer_offset_mm = max(0.0, float(outer_offset_mm))
 
     def _range(self, start, stop, step):
         """Return inclusive floating-point range values from start to stop."""
@@ -74,53 +75,45 @@ class CylindricalScanPlanner:
             return [start_deg]
         return [start_deg + (end_deg - start_deg) * i / (count - 1) for i in range(count)]
 
-    def _min_arc_points_for_safe_chord(self, arc_deg=180.0):
-        """Minimum arc waypoints so every chord between adjacent points stays outside the cylinder.
+    def _scan_thetas_for_layer(self):
+        """Create clockwise and anticlockwise scan-point thetas for one Z layer."""
+        requested = max(1, int(self.scan_points_per_z))
+        cw_count = (requested + 1) // 2
+        ccw_count = requested - cw_count
 
-        The chord connecting two points on a circle of radius r_scan separated by angle Δθ has
-        minimum distance r_scan·cos(Δθ/2) from the centre. We require that distance ≥ r_cyl,
-        i.e. Δθ ≤ 2·arccos(r_cyl / r_scan).
-        """
-        r_scan = self.radius + self.lift_off
-        r_cyl = self.radius
-        if r_cyl <= 0 or r_scan <= r_cyl:
-            # Fallback: dense enough for any reasonable geometry.
-            return max(4, math.ceil(arc_deg / 30.0) + 1)
-        max_step_deg = 2.0 * math.degrees(math.acos(r_cyl / r_scan))
-        return max(2, math.ceil(arc_deg / max_step_deg) + 1)
+        cw_thetas = self._angles_for_sweep(0.0, -180.0, cw_count)
+        if ccw_count <= 0:
+            return cw_thetas, []
+
+        # Generate anticlockwise arc from 0 to +180 and drop the 0-degree duplicate.
+        ccw_full = self._angles_for_sweep(0.0, 180.0, ccw_count + 1)
+        ccw_thetas = ccw_full[1:]
+        return cw_thetas, ccw_thetas
 
     def generate(self):
-        """Build full waypoint list with capture flags for scan and reset segments."""
+        """Build waypoints with CW scan, return, then CCW scan via outer-ring transitions."""
         points = []
-        r = self.radius + self.lift_off
+        r_scan = self.radius + self.lift_off
+        r_outer = r_scan + self.outer_offset_mm
         z_positions = self._z_positions()
         theta_offset_deg = self.theta_start_deg
 
-        def append_segment_with_safety(segment_start_deg, segment_end_deg, capture_at_endpoints=True):
-            """Append a segment with optional non-capture interpolation for safe chords."""
-            safe_count = self._min_arc_points_for_safe_chord(abs(segment_end_deg - segment_start_deg))
-            if safe_count <= 2:
-                angles = [segment_start_deg, segment_end_deg]
-            else:
-                angles = self._angles_for_sweep(segment_start_deg, segment_end_deg, safe_count)
-
-            for idx, theta_deg in enumerate(angles):
-                capture = False
-                if capture_at_endpoints and (idx == 0 or idx == len(angles) - 1):
-                    capture = True
-                segments.append((theta_deg, capture))
-
-        def force_capture_at_indices(indices):
-            """Mark selected segment indices as capture points."""
-            for idx in indices:
-                if 0 <= idx < len(segments):
-                    theta_deg, _ = segments[idx]
-                    segments[idx] = (theta_deg, True)
+        def append_point(radius_mm, theta_deg, z_mm, previous_yaw, capture):
+            """Append one pose at (radius, theta, z), preserving yaw continuity."""
+            shifted_theta_deg = theta_deg + theta_offset_deg
+            theta = math.radians(shifted_theta_deg)
+            x = self.centre[0] + radius_mm * math.cos(theta)
+            y = self.centre[1] + radius_mm * math.sin(theta)
+            roll = 180.0
+            pitch = 0.0
+            yaw = self._yaw_from_theta(shifted_theta_deg, previous_yaw)
+            points.append((x, y, z_mm, roll, pitch, yaw, capture))
+            return yaw
 
         # Radial standoff approach: move to the first scan angle but 50 mm further out,
         # so the robot approaches from clearly outside the cylinder on all axes.
         if z_positions:
-            approach_r = r + 50.0
+            approach_r = r_outer + 50.0
             approach_theta = math.radians(theta_offset_deg)
             ax = self.centre[0] + approach_r * math.cos(approach_theta)
             ay = self.centre[1] + approach_r * math.sin(approach_theta)
@@ -129,71 +122,38 @@ class CylindricalScanPlanner:
             points.append((ax, ay, az, 180.0, 0.0, approach_yaw, False))
 
         for z in z_positions:
-            # Reset yaw continuity per Z layer so each ring starts from a neutral reference.
             previous_yaw = None
-            segments = []
+            cw_thetas, ccw_thetas = self._scan_thetas_for_layer()
+            if not cw_thetas:
+                continue
 
-            # Build scan arcs with safety interpolation (all non-capture initially).
-            first_start = len(segments)
-            append_segment_with_safety(0.0, 180.0, capture_at_endpoints=False)
-            first_end = len(segments)
+            def move_inner_to_inner(theta_from, theta_to, capture_to):
+                """Move between two inner-ring thetas using the outer ring as the transition corridor."""
+                nonlocal previous_yaw
+                previous_yaw = append_point(r_outer, theta_from, z, previous_yaw, capture=False)
+                previous_yaw = append_point(r_outer, theta_to, z, previous_yaw, capture=False)
+                previous_yaw = append_point(r_scan, theta_to, z, previous_yaw, capture=capture_to)
 
-            # Return to start side without recording.
-            append_segment_with_safety(180.0, 0.0, capture_at_endpoints=False)
-            if segments:
-                # Avoid duplicate 180 endpoint at arc boundary.
-                segments.pop(first_end)
+            # Start each layer from the first theta on the outer ring, then move inward to first scan point.
+            first_theta = cw_thetas[0]
+            previous_yaw = append_point(r_outer, first_theta, z, previous_yaw, capture=False)
+            previous_yaw = append_point(r_scan, first_theta, z, previous_yaw, capture=True)
 
-            second_start = len(segments)
-            append_segment_with_safety(0.0, -180.0, capture_at_endpoints=False)
-            second_end = len(segments)
+            # 1) Scan clockwise over 180 degrees (capture enabled).
+            for i in range(len(cw_thetas) - 1):
+                move_inner_to_inner(cw_thetas[i], cw_thetas[i + 1], capture_to=True)
 
-            # Return to start side without recording.
-            append_segment_with_safety(-180.0, 0.0, capture_at_endpoints=False)
-            if len(segments) > second_end:
-                # Avoid duplicate -180 endpoint at arc boundary.
-                segments.pop(second_end)
+            # 2) Return to start theta without capturing.
+            move_inner_to_inner(cw_thetas[-1], first_theta, capture_to=False)
 
-            # Enforce exact requested capture count per Z layer by selecting evenly spaced points
-            # across the two scan arcs only.
-            first_scan_indices = list(range(first_start, first_end))
-            second_scan_indices = list(range(second_start, second_end))
-            scan_indices = first_scan_indices + second_scan_indices
-            if not scan_indices:
-                scan_indices = list(range(first_start, first_end))
+            # 3) Scan anticlockwise over 180 degrees (capture enabled).
+            current_theta = first_theta
+            for theta in ccw_thetas:
+                move_inner_to_inner(current_theta, theta, capture_to=True)
+                current_theta = theta
 
-            requested = max(1, int(self.scan_points_per_z))
-            if requested >= len(scan_indices):
-                force_capture_at_indices(scan_indices)
-            else:
-                chosen = []
-                for i in range(requested):
-                    position = i * (len(scan_indices) - 1) / max(1, requested - 1)
-                    idx = scan_indices[int(round(position))]
-                    if not chosen or idx != chosen[-1]:
-                        chosen.append(idx)
-                while len(chosen) < requested:
-                    for candidate in scan_indices:
-                        if candidate not in chosen:
-                            chosen.append(candidate)
-                        if len(chosen) >= requested:
-                            break
-                force_capture_at_indices(chosen)
-
-            for theta_deg, capture in segments:
-                shifted_theta_deg = theta_deg + theta_offset_deg
-                theta = math.radians(shifted_theta_deg)
-                x = self.centre[0] + r * math.cos(theta)
-                y = self.centre[1] + r * math.sin(theta)
-                z_pos = z
-
-                roll = 180.0
-                pitch = 0.0
-                yaw = self._yaw_from_theta(shifted_theta_deg, previous_yaw)
-                previous_yaw = yaw
-
-                # Store pose and capture flag used by runtime execution loop.
-                points.append((x, y, z_pos, roll, pitch, yaw, capture))
+            # Exit each layer on the outer ring before any inter-layer move.
+            previous_yaw = append_point(r_outer, current_theta, z, previous_yaw, capture=False)
 
         return points
 
@@ -204,6 +164,7 @@ class CylindricalScanPlanner:
             "radius": self.radius,
             "height": self.height,
             "lift_off": self.lift_off,
+            "outer_offset_mm": self.outer_offset_mm,
             "theta_step_deg": self.theta_step_deg,
             "z_step": self.z_step,
             "z_start": self.z_start,
@@ -223,6 +184,7 @@ class CylindricalScanPlanner:
             radius=payload.get("radius", 0.0),
             height=payload.get("height", 0.0),
             lift_off=payload.get("lift_off", 0.0),
+            outer_offset_mm=payload.get("outer_offset_mm", 10.0),
             theta_step_deg=payload.get("theta_step_deg", 30.0),
             z_step=payload.get("z_step", 20.0),
             z_start=payload.get("z_start"),
@@ -350,6 +312,7 @@ def run_cylindrical_scan(
     radius,
     height,
     lift_off,
+    outer_offset_mm=10.0,
     theta_step_deg=30.0,
     z_step=20.0,
     dwell_seconds=5.0,
@@ -367,17 +330,17 @@ def run_cylindrical_scan(
         height = calibration["height"]
         z_start = calibration["z_start"]
         z_end = calibration["z_end"]
-        theta_start_deg = calibration["theta_start_deg"]
+        theta_start_deg = math.degrees(math.atan2(-centre[1], -centre[0]))
 
         print(f"Using full geometry from {calibration['resolved_file']}")
         print(f"Calibrated centre: x={centre[0]:.1f}, y={centre[1]:.1f}, z={centre[2]:.1f}")
         print(f"Calibrated radius: {radius:.1f} mm")
         print(f"Calibrated z range: {z_start:.1f} mm to {z_end:.1f} mm")
-        print(f"Calibrated start angle: {theta_start_deg:.1f} deg (from P0)")
+        print(f"Start angle set to closest-to-base point: {theta_start_deg:.1f} deg")
     else:
         z_start = centre[2]
         z_end = centre[2] + height
-        theta_start_deg = 180.0
+        theta_start_deg = math.degrees(math.atan2(-centre[1], -centre[0]))
         print("No valid calibration file found; using CLI/default geometry")
 
     planner = CylindricalScanPlanner(
@@ -385,6 +348,7 @@ def run_cylindrical_scan(
         radius=radius,
         height=height,
         lift_off=lift_off,
+        outer_offset_mm=outer_offset_mm,
         theta_step_deg=theta_step_deg,
         z_step=z_step,
         z_start=z_start,
@@ -395,8 +359,6 @@ def run_cylindrical_scan(
     )
 
     points = planner.generate()
-    capture_count = sum(1 for *_, capture in points if capture)
-    reset_count = len(points) - capture_count
 
     conn = RobotConnection(ROBOT_IP)
     arm = conn.connect()
@@ -411,14 +373,48 @@ def run_cylindrical_scan(
         with EMATSession() as emat:
             print("Configuring EMAT...")
             emat.configure()
-            print(f"Starting cylindrical scan with {len(points)} motion points")
+            execution_points = list(points)
+
+            # Build a safer startup transit: Z lift, XY move at clearance, then continue.
+            if points:
+                try:
+                    current_pose = robot.get_pose()
+                    if current_pose and len(current_pose) >= 6:
+                        current_x = float(current_pose[0])
+                        current_y = float(current_pose[1])
+                        current_z = float(current_pose[2])
+                        current_roll = float(current_pose[3])
+                        current_pitch = float(current_pose[4])
+                        current_yaw = float(current_pose[5])
+                        first_x, first_y, first_z, first_roll, first_pitch, first_yaw, _ = points[0]
+
+                        # Keep XY transit above the work area before any major wrist rotation.
+                        startup_clearance_mm = 80.0
+                        safe_z = max(current_z, first_z + startup_clearance_mm)
+
+                        z_lift_waypoint = (current_x, current_y, safe_z, current_roll, current_pitch, current_yaw, False)
+                        xy_transit_waypoint = (first_x, first_y, safe_z, current_roll, current_pitch, current_yaw, False)
+                        rotate_at_clearance_waypoint = (first_x, first_y, safe_z, first_roll, first_pitch, first_yaw, False)
+
+                        execution_points = [z_lift_waypoint, xy_transit_waypoint, rotate_at_clearance_waypoint] + points
+                        print(
+                            "Safer startup transit enabled: "
+                            f"lift to z={safe_z:.1f} mm, XY at clearance, then rotate before descent"
+                        )
+                except Exception as exc:
+                    print(f"Warning: unable to create split first move ({exc}); using original path")
+
+            capture_count = sum(1 for *_, capture in execution_points if capture)
+            reset_count = len(execution_points) - capture_count
+
+            print(f"Starting cylindrical scan with {len(execution_points)} motion points")
             print(f"Capture points: {capture_count}, reset/approach points: {reset_count}")
             print(f"Z range: {z_start:.1f} mm to {z_end:.1f} mm")
             print(f"Using {scan_points_per_z} scan points per z layer and {z_scans} z layers")
 
-            for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(points, start=1):
+            for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(execution_points, start=1):
                 action = "SCAN" if capture else "RESET"
-                print(f"[{index}/{len(points)}] {action} move to x={x:.1f}, y={y:.1f}, z={z:.1f}, yaw={yaw:.1f}")
+                print(f"[{index}/{len(execution_points)}] {action} move to x={x:.1f}, y={y:.1f}, z={z:.1f}, yaw={yaw:.1f}")
                 move_code = robot.move_to(x, y, z, speed=speed, roll=roll, pitch=pitch, yaw=yaw)
                 if move_code == 9:
                     # Recover from transient "state not ready to move" by re-arming state once.
@@ -431,7 +427,7 @@ def run_cylindrical_scan(
                     err_code, err_warn = arm.get_err_warn_code(show=True)
                     raise RuntimeError(
                         "Move failed at point "
-                        f"{index}/{len(points)} with API code={move_code}; "
+                        f"{index}/{len(execution_points)} with API code={move_code}; "
                         f"state_query_code={state_code}, state={state}, "
                         f"err_query_code={err_code}, err_warn={err_warn}"
                     )
@@ -447,7 +443,7 @@ def run_cylindrical_scan(
 
                     pose = robot.get_pose()
                     logger.log(pose, data)
-                    print(f"Captured point {index}/{len(points)}")
+                    print(f"Captured point {index}/{len(execution_points)}")
 
             print("Cylindrical scan complete")
     finally:
@@ -464,6 +460,7 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=float, default=150.0, help="Cylinder scan height in mm")
     #Modify lift off below.
     parser.add_argument("--lift-off", type=float, default=1.0, help="Radial lift-off from cylinder surface in mm")
+    parser.add_argument("--outer-offset-mm", type=float, default=10.0, help="Extra radial offset for transition ring in mm")
     parser.add_argument("--dwell", type=float, default=5.0, help="Seconds to dwell at each point")
     parser.add_argument("--speed", type=float, default=40.0, help="Motion speed")
     parser.add_argument("--calibration-file", type=str, default=None, help="Optional saved calibration JSON file")
@@ -485,6 +482,7 @@ if __name__ == "__main__":
         radius=args.radius,
         height=args.height,
         lift_off=args.lift_off,
+        outer_offset_mm=args.outer_offset_mm,
         dwell_seconds=args.dwell,
         speed=args.speed,
         output_folder=args.output_folder,
