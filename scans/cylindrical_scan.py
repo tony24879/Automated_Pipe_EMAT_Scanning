@@ -76,19 +76,22 @@ class CylindricalScanPlanner:
         return [start_deg + (end_deg - start_deg) * i / (count - 1) for i in range(count)]
 
     def _scan_thetas_for_layer(self):
-        """Create clockwise and anticlockwise scan-point thetas for one Z layer."""
-        requested = max(1, int(self.scan_points_per_z))
-        cw_count = (requested + 1) // 2
-        ccw_count = requested - cw_count
+        """Create first/second sweep scan-point thetas for one Z layer."""
+        requested = max(2, int(self.scan_points_per_z))
 
-        cw_thetas = self._angles_for_sweep(0.0, -180.0, cw_count)
-        if ccw_count <= 0:
-            return cw_thetas, []
+        # Symmetric two-pass layout needs an even total to keep both sweeps on
+        # the exact same angular grid while skipping duplicate seam endpoints.
+        if requested % 2 != 0:
+            requested -= 1
 
-        # Generate anticlockwise arc from 0 to +180 and drop the 0-degree duplicate.
-        ccw_full = self._angles_for_sweep(0.0, 180.0, ccw_count + 1)
-        ccw_thetas = ccw_full[1:]
-        return cw_thetas, ccw_thetas
+        # First pass includes seam endpoints: 0, ..., +180.
+        first_count = (requested // 2) + 1
+        first_sweep_thetas = self._angles_for_sweep(0.0, 180.0, first_count)
+
+        # Second pass uses the same grid magnitudes with negative sign and excludes
+        # seam endpoints (0 and -180) to avoid duplicate captures.
+        second_sweep_thetas = [-theta for theta in first_sweep_thetas[1:-1]]
+        return first_sweep_thetas, second_sweep_thetas
 
     def generate(self):
         """Build waypoints with CW scan, return, then CCW scan via outer-ring transitions."""
@@ -123,8 +126,8 @@ class CylindricalScanPlanner:
 
         for z in z_positions:
             previous_yaw = None
-            cw_thetas, ccw_thetas = self._scan_thetas_for_layer()
-            if not cw_thetas:
+            first_sweep_thetas, second_sweep_thetas = self._scan_thetas_for_layer()
+            if not first_sweep_thetas:
                 continue
 
             def move_inner_to_inner(theta_from, theta_to, capture_to):
@@ -135,25 +138,35 @@ class CylindricalScanPlanner:
                 previous_yaw = append_point(r_scan, theta_to, z, previous_yaw, capture=capture_to)
 
             # Start each layer from the first theta on the outer ring, then move inward to first scan point.
-            first_theta = cw_thetas[0]
+            first_theta = first_sweep_thetas[0]
             previous_yaw = append_point(r_outer, first_theta, z, previous_yaw, capture=False)
             previous_yaw = append_point(r_scan, first_theta, z, previous_yaw, capture=True)
 
-            # 1) Scan clockwise over 180 degrees (capture enabled).
-            for i in range(len(cw_thetas) - 1):
-                move_inner_to_inner(cw_thetas[i], cw_thetas[i + 1], capture_to=True)
+            # 1) First sweep from 0 to +180 (capture enabled, includes endpoints).
+            for i in range(len(first_sweep_thetas) - 1):
+                move_inner_to_inner(first_sweep_thetas[i], first_sweep_thetas[i + 1], capture_to=True)
 
-            # 2) Return to start theta without capturing.
-            move_inner_to_inner(cw_thetas[-1], first_theta, capture_to=False)
+            # 2) Return +180 back to 0 along the same arc on outer ring only.
+            previous_yaw = append_point(r_outer, first_sweep_thetas[-1], z, previous_yaw, capture=False)
+            for theta in reversed(first_sweep_thetas[:-1]):
+                previous_yaw = append_point(r_outer, theta, z, previous_yaw, capture=False)
 
-            # 3) Scan anticlockwise over 180 degrees (capture enabled).
-            current_theta = first_theta
-            for theta in ccw_thetas:
-                move_inner_to_inner(current_theta, theta, capture_to=True)
-                current_theta = theta
+            # 3) Second sweep from 0 toward -180: capture interior points only.
+            if second_sweep_thetas:
+                current_theta = first_theta
+                for theta in second_sweep_thetas:
+                    move_inner_to_inner(current_theta, theta, capture_to=True)
+                    current_theta = theta
 
-            # Exit each layer on the outer ring before any inter-layer move.
-            previous_yaw = append_point(r_outer, current_theta, z, previous_yaw, capture=False)
+                # Reach -180 on the outer ring without scanning at -180.
+                previous_yaw = append_point(r_outer, current_theta, z, previous_yaw, capture=False)
+                second_end_theta = -180.0
+                previous_yaw = append_point(r_outer, second_end_theta, z, previous_yaw, capture=False)
+
+                # 4) Return -180 back to 0 along the same outer arc.
+                for theta in reversed(second_sweep_thetas):
+                    previous_yaw = append_point(r_outer, theta, z, previous_yaw, capture=False)
+                previous_yaw = append_point(r_outer, first_theta, z, previous_yaw, capture=False)
 
         return points
 
