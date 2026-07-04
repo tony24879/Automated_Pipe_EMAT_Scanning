@@ -1,12 +1,14 @@
 """Plan and execute EMAT scans around a horizontal cylinder with serpentine theta sweeps."""
 
 import argparse
+import importlib.util
 import json
 import math
 import time
 from pathlib import Path
 
 from config.robot_config import ROBOT_IP
+from config.robot_config import TCP_OFFSET
 from emat.emat_interface import EMATSession
 from emat.live_plot import LiveWaveformPlot
 from emat.sync_logger import SyncLogger
@@ -236,6 +238,51 @@ def _read_horizontal_calibration_geometry(calibration_file):
     }
 
 
+def _load_live_scan_3d_view_class():
+    """Load the optional live 3D view wrapper from the 3Dview folder."""
+    module_path = Path(__file__).resolve().parent.parent / "3Dview" / "live_scan_3d_view.py"
+    if not module_path.exists():
+        return None
+
+    spec = importlib.util.spec_from_file_location("live_scan_3d_view", module_path)
+    if spec is None or spec.loader is None:
+        return None
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return getattr(module, "LiveScan3DView", None)
+
+
+def _build_cylinder_surface_points_from_scan(points, centre, lift_off):
+    """Project capture points inward by lift-off to estimate cylinder surface points."""
+    centre_y = float(centre[1])
+    centre_z = float(centre[2])
+    projected = []
+
+    for x, y, z, *_rest, capture in points:
+        if not capture:
+            continue
+
+        dy = float(y) - centre_y
+        dz = float(z) - centre_z
+        radial_norm = math.hypot(dy, dz)
+        if radial_norm < 1e-9:
+            continue
+
+        uy = dy / radial_norm
+        uz = dz / radial_norm
+
+        projected.append(
+            (
+                float(x),
+                float(y) - float(lift_off) * uy,
+                float(z) - float(lift_off) * uz,
+            )
+        )
+
+    return projected
+
+
 def run_horizontal_cylindrical_scan(
     centre,
     radius,
@@ -250,6 +297,7 @@ def run_horizontal_cylindrical_scan(
     x_scans=5,
     theta_limit_a_deg=0.0,
     theta_limit_b_deg=180.0,
+    enable_3d_view=True,
 ):
     """Execute horizontal cylindrical scan and log synchronized EMAT + robot data."""
     calibration = _read_horizontal_calibration_geometry(calibration_file)
@@ -287,6 +335,8 @@ def run_horizontal_cylindrical_scan(
     )
 
     points = planner.generate()
+    cylinder_surface_points = _build_cylinder_surface_points_from_scan(points, centre, lift_off)
+    LiveScan3DView = _load_live_scan_3d_view_class() if enable_3d_view else None
 
     conn = RobotConnection(ROBOT_IP)
     arm = conn.connect()
@@ -295,6 +345,25 @@ def run_horizontal_cylindrical_scan(
     setup.configure()
 
     plotter = LiveWaveformPlot()
+    view3d = None
+    if LiveScan3DView is not None:
+        try:
+            view3d = LiveScan3DView(
+                centre=centre,
+                radius=radius,
+                x_start=x_start,
+                x_end=x_end,
+                theta_limit_a_deg=theta_limit_a_deg,
+                theta_limit_b_deg=theta_limit_b_deg,
+                surface_points=cylinder_surface_points,
+                tcp_offset_xyz=TCP_OFFSET[:3],
+            )
+            print("Live 3D scan view enabled")
+        except Exception as exc:
+            print(f"Warning: unable to initialize 3D scan view ({exc})")
+    elif enable_3d_view:
+        print("Warning: 3D view wrapper not found; continuing without it")
+
     logger = SyncLogger(folder=output_folder)
 
     try:
@@ -339,6 +408,9 @@ def run_horizontal_cylindrical_scan(
             print(f"X range: {x_start:.1f} mm to {x_end:.1f} mm")
             print(f"Using {scan_points_per_x} scan points per x layer and {x_scans} x layers")
 
+            if view3d is not None:
+                view3d.update_from_arm(arm)
+
             for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(execution_points, start=1):
                 action = "SCAN" if capture else "RESET"
                 print(
@@ -361,12 +433,17 @@ def run_horizontal_cylindrical_scan(
                         f"err_query_code={err_code}, err_warn={err_warn}"
                     )
 
+                if view3d is not None:
+                    view3d.update_from_arm(arm, current_target=(x, y, z), capture=capture)
+
                 if capture:
                     dwell_until = time.monotonic() + dwell_seconds
                     data = None
                     while time.monotonic() < dwell_until:
                         data = emat.acquire()
                         plotter.update(data)
+                        if view3d is not None:
+                            view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
                         time.sleep(0.1)
 
                     pose = robot.get_pose()
@@ -376,6 +453,8 @@ def run_horizontal_cylindrical_scan(
             print("Horizontal cylindrical scan complete")
     finally:
         plotter.close()
+        if view3d is not None:
+            view3d.close()
         logger.close()
         conn.disconnect()
 
@@ -385,7 +464,7 @@ if __name__ == "__main__":
     parser.add_argument("--centre", type=float, nargs=3, default=[250.0, 0.0, 150.0], help="Cylinder centre x y z")
     parser.add_argument("--radius", type=float, default=50.0, help="Cylinder radius in mm")
     parser.add_argument("--length", type=float, default=150.0, help="Cylinder scan length along x in mm")
-    parser.add_argument("--lift-off", type=float, default=1.0, help="Radial lift-off from cylinder surface in mm")
+    parser.add_argument("--lift-off", type=float, default=0.5, help="Radial lift-off from cylinder surface in mm")
     parser.add_argument("--outer-offset-mm", type=float, default=10.0, help="Extra radial offset for transition ring in mm")
     parser.add_argument("--theta-limit-a-deg", type=float, default=0.0, help="First angular limit in yz-plane degrees")
     parser.add_argument("--theta-limit-b-deg", type=float, default=180.0, help="Second angular limit in yz-plane degrees")
@@ -395,6 +474,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-folder", type=str, default="data/raw", help="Folder for scan logs")
     parser.add_argument("--scan-points-per-x", type=int, default=None, help="Number of scan points per x layer")
     parser.add_argument("--x-scans", type=int, default=None, help="Number of x layers to scan")
+    parser.add_argument("--disable-3d-view", action="store_true", help="Disable live 3D visualization window")
     args = parser.parse_args()
 
     scan_points_per_x = args.scan_points_per_x
@@ -419,4 +499,5 @@ if __name__ == "__main__":
         x_scans=x_scans,
         theta_limit_a_deg=args.theta_limit_a_deg,
         theta_limit_b_deg=args.theta_limit_b_deg,
+        enable_3d_view=not args.disable_3d_view,
     )
