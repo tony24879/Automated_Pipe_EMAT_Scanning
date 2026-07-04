@@ -13,7 +13,7 @@ PAYLOAD_KG = 0.080
 #PAYLOAD_KG = 0.094
 #PAYLOAD_KG = 0.104
 
-# Tool center of gravity relative to TCP, in millimeters.
+# Tool center of gravity relative to TCP, in millimeters
 COG = [0, 0, 75]
 #COG = [0, 0, 60]
 #COG = [0, -20, 75]
