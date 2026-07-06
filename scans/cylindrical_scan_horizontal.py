@@ -253,6 +253,76 @@ def _load_live_scan_3d_view_class():
     return getattr(module, "LiveScan3DView", None)
 
 
+def _load_live_scan_3d_mesh_view_class():
+    """Load the optional PyVista mesh-based 3D view wrapper from the 3Dview folder."""
+    module_path = Path(__file__).resolve().parent.parent / "3Dview" / "live_scan_3d_mesh_view.py"
+    if not module_path.exists():
+        return None
+
+    spec = importlib.util.spec_from_file_location("live_scan_3d_mesh_view", module_path)
+    if spec is None or spec.loader is None:
+        return None
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return getattr(module, "LiveScan3DMeshView", None)
+
+
+def _create_3d_view(
+    backend,
+    centre,
+    radius,
+    x_start,
+    x_end,
+    theta_limit_a_deg,
+    theta_limit_b_deg,
+    cylinder_surface_points,
+    mesh_dir,
+    mesh_scale,
+):
+    """Create a live 3D view using selected backend with fallback behavior."""
+    base_kwargs = {
+        "centre": centre,
+        "radius": radius,
+        "x_start": x_start,
+        "x_end": x_end,
+        "theta_limit_a_deg": theta_limit_a_deg,
+        "theta_limit_b_deg": theta_limit_b_deg,
+        "surface_points": cylinder_surface_points,
+        "tcp_offset_xyz": TCP_OFFSET[:3],
+    }
+
+    if backend in ("mesh", "auto"):
+        mesh_view_class = _load_live_scan_3d_mesh_view_class()
+        if mesh_view_class is not None:
+            try:
+                view = mesh_view_class(
+                    **base_kwargs,
+                    mesh_dir=mesh_dir,
+                    mesh_scale=mesh_scale,
+                )
+                print("Live 3D mesh view enabled")
+                return view
+            except Exception as exc:
+                if backend == "mesh":
+                    raise RuntimeError(f"Unable to initialize mesh backend: {exc}") from exc
+                print(f"Warning: mesh backend unavailable ({exc}); falling back to matplotlib backend")
+        elif backend == "mesh":
+            raise RuntimeError("Mesh backend requested but 3D mesh wrapper file is missing")
+
+    if backend in ("matplot", "auto"):
+        matplot_view_class = _load_live_scan_3d_view_class()
+        if matplot_view_class is not None:
+            try:
+                view = matplot_view_class(**base_kwargs)
+                print("Live 3D matplotlib view enabled")
+                return view
+            except Exception as exc:
+                raise RuntimeError(f"Unable to initialize matplotlib backend: {exc}") from exc
+
+    raise RuntimeError("No 3D backend could be loaded")
+
+
 def _build_cylinder_surface_points_from_scan(points, centre, lift_off):
     """Project capture points inward by lift-off to estimate cylinder surface points."""
     centre_y = float(centre[1])
@@ -298,6 +368,9 @@ def run_horizontal_cylindrical_scan(
     theta_limit_a_deg=0.0,
     theta_limit_b_deg=180.0,
     enable_3d_view=True,
+    view_3d_backend="auto",
+    robot_mesh_dir="3Dview/meshes/lite6",
+    robot_mesh_scale=1.0,
 ):
     """Execute horizontal cylindrical scan and log synchronized EMAT + robot data."""
     calibration = _read_horizontal_calibration_geometry(calibration_file)
@@ -336,7 +409,6 @@ def run_horizontal_cylindrical_scan(
 
     points = planner.generate()
     cylinder_surface_points = _build_cylinder_surface_points_from_scan(points, centre, lift_off)
-    LiveScan3DView = _load_live_scan_3d_view_class() if enable_3d_view else None
 
     conn = RobotConnection(ROBOT_IP)
     arm = conn.connect()
@@ -346,23 +418,22 @@ def run_horizontal_cylindrical_scan(
 
     plotter = LiveWaveformPlot()
     view3d = None
-    if LiveScan3DView is not None:
+    if enable_3d_view:
         try:
-            view3d = LiveScan3DView(
+            view3d = _create_3d_view(
+                backend=view_3d_backend,
                 centre=centre,
                 radius=radius,
                 x_start=x_start,
                 x_end=x_end,
                 theta_limit_a_deg=theta_limit_a_deg,
                 theta_limit_b_deg=theta_limit_b_deg,
-                surface_points=cylinder_surface_points,
-                tcp_offset_xyz=TCP_OFFSET[:3],
+                cylinder_surface_points=cylinder_surface_points,
+                mesh_dir=robot_mesh_dir,
+                mesh_scale=robot_mesh_scale,
             )
-            print("Live 3D scan view enabled")
         except Exception as exc:
             print(f"Warning: unable to initialize 3D scan view ({exc})")
-    elif enable_3d_view:
-        print("Warning: 3D view wrapper not found; continuing without it")
 
     logger = SyncLogger(folder=output_folder)
 
@@ -475,6 +546,25 @@ if __name__ == "__main__":
     parser.add_argument("--scan-points-per-x", type=int, default=None, help="Number of scan points per x layer")
     parser.add_argument("--x-scans", type=int, default=None, help="Number of x layers to scan")
     parser.add_argument("--disable-3d-view", action="store_true", help="Disable live 3D visualization window")
+    parser.add_argument(
+        "--view-3d-backend",
+        type=str,
+        default="auto",
+        choices=["auto", "matplot", "mesh"],
+        help="3D view backend selection",
+    )
+    parser.add_argument(
+        "--robot-mesh-dir",
+        type=str,
+        default="3Dview/meshes/lite6",
+        help="Folder containing per-link STL files for mesh backend",
+    )
+    parser.add_argument(
+        "--robot-mesh-scale",
+        type=float,
+        default=1.0,
+        help="Uniform STL scale factor for mesh backend",
+    )
     args = parser.parse_args()
 
     scan_points_per_x = args.scan_points_per_x
@@ -500,4 +590,7 @@ if __name__ == "__main__":
         theta_limit_a_deg=args.theta_limit_a_deg,
         theta_limit_b_deg=args.theta_limit_b_deg,
         enable_3d_view=not args.disable_3d_view,
+        view_3d_backend=args.view_3d_backend,
+        robot_mesh_dir=args.robot_mesh_dir,
+        robot_mesh_scale=args.robot_mesh_scale,
     )

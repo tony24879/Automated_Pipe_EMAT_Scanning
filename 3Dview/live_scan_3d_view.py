@@ -56,6 +56,7 @@ class LiveScan3DView:
         surface_points=None,
         tcp_offset_xyz=None,
         draw_interval_sec=0.05,
+        **_unused_kwargs,
     ):
         self.centre = np.array(centre, dtype=float)
         self.radius = float(radius)
