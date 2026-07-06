@@ -1,6 +1,9 @@
 """Thin context-managed wrapper around the Vitesse EMAT API."""
 
 from VitesseAPI import Vitesse
+import numpy as np
+import numpy.typing
+from scipy import signal
 
 
 class EMATSession:
@@ -35,4 +38,22 @@ class EMATSession:
 
     def acquire(self):
         """Return the latest waveform array from the EMAT device."""
-        return self.V.getArray()
+        samplingFrequency = 50e6
+        numCycles = 2
+        signalFrequency = 3.6e6
+        nyquistFrequency = 0.5 * samplingFrequency  # nyquist frequency
+        # frequency we want to ignore below
+        lowcut = (1-(1/numCycles))*signalFrequency
+        # frequency we want to ignore above
+        highcut = (1+(1/numCycles))*signalFrequency
+        low = lowcut/nyquistFrequency
+        high = highcut/nyquistFrequency
+    
+        # bandpass filter applied to raw signal from amplifier
+        b, a = signal.butter(2, [low, high], btype='band')
+    
+        filtAscan = signal.filtfilt(b, a, self.V.getArray())
+        # hilbert filter applied to filtered signal from amplifier
+        hilbAscan = abs(
+            signal.hilbert(filtAscan))
+        return hilbAscan
