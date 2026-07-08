@@ -71,7 +71,7 @@ class Lite6:
 
     def home(self):
         """Move to a simple predefined home position."""
-        self.move_to(300, 0, 200, speed=30)
+        return self.move_to(300, 0, 200, speed=30)
 
     # -------------------------
     # SCANNING HELPERS

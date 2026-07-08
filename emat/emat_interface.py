@@ -30,7 +30,7 @@ class EMATSession:
             numCycles=2,
             channelsOnDrive=[1,0,0,0,0,0,0,0],
             channelsOnReceive=[1,0,0,0,0,0,0,0],
-            numAverages=250,
+            numAverages=1000,
             PRF=1000,
             recordLength=50e-6
             #Edit the above parameters to fine tune data acquisition.

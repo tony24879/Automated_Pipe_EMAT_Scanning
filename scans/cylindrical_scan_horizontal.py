@@ -437,11 +437,94 @@ def run_horizontal_cylindrical_scan(
 
     logger = SyncLogger(folder=output_folder)
 
+    startup_origin_pose = None
+    startup_safe_z = None
+    last_reached_pose = None
+
+    def _move_with_retry(x, y, z, roll, pitch, yaw, move_speed):
+        """Execute one Cartesian move and retry once if controller state is not ready."""
+        move_code = robot.move_to(x, y, z, speed=move_speed, roll=roll, pitch=pitch, yaw=yaw)
+        if move_code == 9:
+            arm.set_state(0)
+            time.sleep(0.1)
+            move_code = robot.move_to(x, y, z, speed=move_speed, roll=roll, pitch=pitch, yaw=yaw)
+        return move_code
+
+    def _execute_reverse_startup_retreat(reason):
+        """Retreat with lift/across transit, then run controller reset."""
+        if startup_origin_pose is None or startup_safe_z is None:
+            print("Warning: startup retreat context unavailable; skipping reverse retreat")
+            return
+
+        retreat_pose = last_reached_pose
+        if retreat_pose is None:
+            current_pose = robot.get_pose()
+            if current_pose and len(current_pose) >= 6:
+                retreat_pose = tuple(float(v) for v in current_pose[:6])
+
+        if retreat_pose is None:
+            print("Warning: unable to determine current pose for retreat; skipping reverse retreat")
+            return
+
+        origin_x, origin_y, _origin_z, _origin_roll, _origin_pitch, _origin_yaw = startup_origin_pose
+        current_x, current_y, current_z, current_roll, current_pitch, current_yaw = retreat_pose
+        safe_z = float(startup_safe_z)
+        retreat_speed = min(float(speed), 30.0)
+        radial_retreat_mm = 25.0
+
+        dy = current_y - float(centre[1])
+        dz = current_z - float(centre[2])
+        radial_norm = math.hypot(dy, dz)
+        if radial_norm < 1e-9:
+            radial_out_y = current_y + radial_retreat_mm
+            radial_out_z = current_z
+        else:
+            radial_out_y = current_y + radial_retreat_mm * (dy / radial_norm)
+            radial_out_z = current_z + radial_retreat_mm * (dz / radial_norm)
+
+        retreat_moves = [
+            (current_x, radial_out_y, radial_out_z, current_roll, current_pitch, current_yaw, "Radial outward nudge"),
+            (current_x, current_y, safe_z, current_roll, current_pitch, current_yaw, "Lift to clearance"),
+            (origin_x, origin_y, safe_z, current_roll, current_pitch, current_yaw, "Transit XY at clearance"),
+        ]
+
+        print(
+            f"Executing reverse startup retreat after {reason}: "
+            f"radial-outward, up to z={safe_z:.1f}, across to startup XY, then controller reset"
+        )
+
+        for rx, ry, rz, rroll, rpitch, ryaw, label in retreat_moves:
+            move_code = _move_with_retry(rx, ry, rz, rroll, rpitch, ryaw, retreat_speed)
+            if move_code != 0:
+                print(f"Warning: retreat step '{label}' failed with API code={move_code}; aborting retreat")
+                return
+
+        print("Retreat transit complete; running arm.reset(wait=True)")
+        reset_code = arm.reset(wait=True)
+        if reset_code is None:
+            state_query_code, state = arm.get_state()
+            err_query_code, err_warn = arm.get_err_warn_code(show=True)
+            if state_query_code == 0 and err_query_code == 0 and err_warn == [0, 0]:
+                print("Robot reset completed")
+            else:
+                print(
+                    "Warning: arm.reset(wait=True) returned None and controller status is not clean; "
+                    f"state_query_code={state_query_code}, state={state}, "
+                    f"err_query_code={err_query_code}, err_warn={err_warn}"
+                )
+        elif reset_code != 0:
+            print(f"Warning: arm.reset(wait=True) failed with API code={reset_code}")
+        else:
+            print("Robot reset completed")
+
     try:
         with EMATSession() as emat:
             print("Configuring EMAT...")
             emat.configure()
             execution_points = list(points)
+            scan_completed = False
+            scan_interrupted = False
+            pending_exception = None
 
             # Build a safer startup transit: Z lift, XY move at clearance, then continue.
             if points:
@@ -454,10 +537,19 @@ def run_horizontal_cylindrical_scan(
                         current_roll = float(current_pose[3])
                         current_pitch = float(current_pose[4])
                         current_yaw = float(current_pose[5])
+                        startup_origin_pose = (
+                            current_x,
+                            current_y,
+                            current_z,
+                            current_roll,
+                            current_pitch,
+                            current_yaw,
+                        )
                         first_x, first_y, first_z, first_roll, first_pitch, first_yaw, _ = points[0]
 
                         startup_clearance_mm = 80.0
                         safe_z = max(current_z, first_z + startup_clearance_mm)
+                        startup_safe_z = float(safe_z)
 
                         z_lift_waypoint = (current_x, current_y, safe_z, current_roll, current_pitch, current_yaw, False)
                         xy_transit_waypoint = (first_x, first_y, safe_z, current_roll, current_pitch, current_yaw, False)
@@ -473,6 +565,7 @@ def run_horizontal_cylindrical_scan(
 
             capture_count = sum(1 for *_, capture in execution_points if capture)
             reset_count = len(execution_points) - capture_count
+            first_capture_x = None
 
             print(f"Starting horizontal cylindrical scan with {len(execution_points)} motion points")
             print(f"Capture points: {capture_count}, reset/approach points: {reset_count}")
@@ -482,46 +575,67 @@ def run_horizontal_cylindrical_scan(
             if view3d is not None:
                 view3d.update_from_arm(arm)
 
-            for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(execution_points, start=1):
-                action = "SCAN" if capture else "RESET"
-                print(
-                    f"[{index}/{len(execution_points)}] {action} move to "
-                    f"x={x:.1f}, y={y:.1f}, z={z:.1f}, roll={roll:.1f}, pitch={pitch:.1f}, yaw={yaw:.1f}"
-                )
-                move_code = robot.move_to(x, y, z, speed=speed, roll=roll, pitch=pitch, yaw=yaw)
-                if move_code == 9:
-                    arm.set_state(0)
-                    time.sleep(0.1)
-                    move_code = robot.move_to(x, y, z, speed=speed, roll=roll, pitch=pitch, yaw=yaw)
-
-                if move_code != 0:
-                    state_code, state = arm.get_state()
-                    err_code, err_warn = arm.get_err_warn_code(show=True)
-                    raise RuntimeError(
-                        "Move failed at point "
-                        f"{index}/{len(execution_points)} with API code={move_code}; "
-                        f"state_query_code={state_code}, state={state}, "
-                        f"err_query_code={err_code}, err_warn={err_warn}"
+            try:
+                for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(execution_points, start=1):
+                    action = "SCAN" if capture else "RESET"
+                    print(
+                        f"[{index}/{len(execution_points)}] {action} move to "
+                        f"x={x:.1f}, y={y:.1f}, z={z:.1f}, roll={roll:.1f}, pitch={pitch:.1f}, yaw={yaw:.1f}"
                     )
+                    move_code = _move_with_retry(x, y, z, roll, pitch, yaw, speed)
 
-                if view3d is not None:
-                    view3d.update_from_arm(arm, current_target=(x, y, z), capture=capture)
+                    if move_code != 0:
+                        state_code, state = arm.get_state()
+                        err_code, err_warn = arm.get_err_warn_code(show=True)
+                        raise RuntimeError(
+                            "Move failed at point "
+                            f"{index}/{len(execution_points)} with API code={move_code}; "
+                            f"state_query_code={state_code}, state={state}, "
+                            f"err_query_code={err_code}, err_warn={err_warn}"
+                        )
 
-                if capture:
-                    dwell_until = time.monotonic() + dwell_seconds
-                    data = None
-                    while time.monotonic() < dwell_until:
-                        data = emat.acquire()
-                        plotter.update(data)
-                        if view3d is not None:
-                            view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
-                        time.sleep(0.1)
+                    last_reached_pose = (float(x), float(y), float(z), float(roll), float(pitch), float(yaw))
 
-                    pose = robot.get_pose()
-                    logger.log(pose, data)
-                    print(f"Captured point {index}/{len(execution_points)}")
+                    if view3d is not None:
+                        view3d.update_from_arm(arm, current_target=(x, y, z), capture=capture)
 
-            print("Horizontal cylindrical scan complete")
+                    if capture:
+                        dwell_until = time.monotonic() + dwell_seconds
+                        data = None
+                        while time.monotonic() < dwell_until:
+                            data = emat.acquire()
+                            plotter.update(data)
+                            if view3d is not None:
+                                view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
+                            time.sleep(0.1)
+
+                        if first_capture_x is None:
+                            first_capture_x = float(x)
+
+                        theta_deg = math.degrees(math.atan2(float(z) - float(centre[2]), float(y) - float(centre[1])))
+                        axis_position_mm = float(x) - float(first_capture_x)
+
+                        pose = robot.get_pose()
+                        logger.log(pose, data, theta=theta_deg, axis_position=axis_position_mm)
+                        print(f"Captured point {index}/{len(execution_points)}")
+
+                scan_completed = True
+                print("Horizontal cylindrical scan complete")
+            except KeyboardInterrupt:
+                scan_interrupted = True
+                print("Scan interrupted by user")
+            except Exception as exc:
+                pending_exception = exc
+
+            if scan_completed or scan_interrupted:
+                retreat_reason = "completion" if scan_completed else "interruption"
+                try:
+                    _execute_reverse_startup_retreat(retreat_reason)
+                except Exception as retreat_exc:
+                    print(f"Warning: reverse retreat failed ({retreat_exc})")
+
+            if pending_exception is not None:
+                raise pending_exception
     finally:
         plotter.close()
         if view3d is not None:
@@ -535,8 +649,8 @@ if __name__ == "__main__":
     parser.add_argument("--centre", type=float, nargs=3, default=[250.0, 0.0, 150.0], help="Cylinder centre x y z")
     parser.add_argument("--radius", type=float, default=50.0, help="Cylinder radius in mm")
     parser.add_argument("--length", type=float, default=150.0, help="Cylinder scan length along x in mm")
-    parser.add_argument("--lift-off", type=float, default=0.5, help="Radial lift-off from cylinder surface in mm")
-    parser.add_argument("--outer-offset-mm", type=float, default=10.0, help="Extra radial offset for transition ring in mm")
+    parser.add_argument("--lift-off", type=float, default=0.0, help="Radial lift-off from cylinder surface in mm")
+    parser.add_argument("--outer-offset-mm", type=float, default=0.0, help="Extra radial offset for transition ring in mm")
     parser.add_argument("--theta-limit-a-deg", type=float, default=0.0, help="First angular limit in yz-plane degrees")
     parser.add_argument("--theta-limit-b-deg", type=float, default=180.0, help="Second angular limit in yz-plane degrees")
     parser.add_argument("--dwell", type=float, default=5.0, help="Seconds to dwell at each point")
