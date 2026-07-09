@@ -56,4 +56,4 @@ class EMATSession:
         # hilbert filter applied to filtered signal from amplifier
         hilbAscan = abs(
             signal.hilbert(filtAscan))
-        return hilbAscan
+        return filtAscan

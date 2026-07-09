@@ -653,7 +653,7 @@ if __name__ == "__main__":
     parser.add_argument("--outer-offset-mm", type=float, default=0.0, help="Extra radial offset for transition ring in mm")
     parser.add_argument("--theta-limit-a-deg", type=float, default=0.0, help="First angular limit in yz-plane degrees")
     parser.add_argument("--theta-limit-b-deg", type=float, default=180.0, help="Second angular limit in yz-plane degrees")
-    parser.add_argument("--dwell", type=float, default=5.0, help="Seconds to dwell at each point")
+    parser.add_argument("--dwell", type=float, default=0.5, help="Seconds to dwell at each point")
     parser.add_argument("--speed", type=float, default=40.0, help="Motion speed")
     parser.add_argument("--calibration-file", type=str, default=None, help="Optional saved calibration JSON file")
     parser.add_argument("--output-folder", type=str, default="data/raw", help="Folder for scan logs")

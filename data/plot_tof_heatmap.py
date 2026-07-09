@@ -46,7 +46,36 @@ def parse_args() -> argparse.Namespace:
         "--save",
         type=Path,
         default=None,
-        help="Optional output image path. If omitted, only a window is shown.",
+        help="Optional output image path. If omitted, auto-saves to data/processed/plots.",
+    )
+    parser.add_argument(
+        "--grid-width",
+        type=int,
+        default=300,
+        help="Interpolated grid width in pixels (default: 300)",
+    )
+    parser.add_argument(
+        "--grid-height",
+        type=int,
+        default=300,
+        help="Interpolated grid height in pixels (default: 300)",
+    )
+    parser.add_argument(
+        "--idw-power",
+        type=float,
+        default=2.0,
+        help="Inverse-distance interpolation power (default: 2.0)",
+    )
+    parser.add_argument(
+        "--hide-points",
+        action="store_true",
+        help="Hide original scatter points and only show the interpolated map.",
+    )
+    parser.add_argument(
+        "--interpolation",
+        choices=["on", "off"],
+        default="on",
+        help="Turn interpolation on/off (default: on)",
     )
     return parser.parse_args()
 
@@ -94,39 +123,132 @@ def load_points(csv_path: Path, theta_col: int, x_col: int, tof_col: int) -> tup
     return np.array(theta_vals), np.array(x_vals), np.array(tof_vals)
 
 
-def build_heatmap_grid(theta: np.ndarray, x: np.ndarray, tof: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def average_duplicate_points(
+    theta: np.ndarray, x: np.ndarray, tof: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # Average duplicate points at identical (theta, x) coordinates.
     buckets: dict[tuple[float, float], list[float]] = defaultdict(list)
     for t_val, x_val, tof_val in zip(theta, x, tof):
         buckets[(t_val, x_val)].append(tof_val)
 
-    unique_theta = np.array(sorted({key[0] for key in buckets.keys()}), dtype=float)
-    unique_x = np.array(sorted({key[1] for key in buckets.keys()}), dtype=float)
-
-    heat = np.full((len(unique_theta), len(unique_x)), np.nan, dtype=float)
-    theta_to_i = {value: i for i, value in enumerate(unique_theta)}
-    x_to_j = {value: j for j, value in enumerate(unique_x)}
-
+    theta_out: list[float] = []
+    x_out: list[float] = []
+    tof_out: list[float] = []
     for (t_val, x_val), tof_list in buckets.items():
-        i = theta_to_i[t_val]
-        j = x_to_j[x_val]
-        heat[i, j] = float(np.mean(tof_list))
+        theta_out.append(t_val)
+        x_out.append(x_val)
+        tof_out.append(float(np.mean(tof_list)))
 
-    return unique_theta, unique_x, heat
+    return np.array(theta_out), np.array(x_out), np.array(tof_out)
 
 
-def plot_heatmap(theta: np.ndarray, x: np.ndarray, heat: np.ndarray, save_path: Path | None) -> None:
+def interpolate_idw(
+    theta: np.ndarray,
+    x: np.ndarray,
+    tof: np.ndarray,
+    grid_width: int,
+    grid_height: int,
+    power: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if grid_width < 2 or grid_height < 2:
+        raise ValueError("Grid width and height must both be >= 2.")
+    if power <= 0:
+        raise ValueError("IDW power must be > 0.")
+
+    x_lin = np.linspace(float(np.min(x)), float(np.max(x)), grid_width)
+    theta_lin = np.linspace(float(np.min(theta)), float(np.max(theta)), grid_height)
+    x_grid, theta_grid = np.meshgrid(x_lin, theta_lin)
+
+    # Vectorized IDW interpolation over the whole grid.
+    dx = x_grid[None, :, :] - x[:, None, None]
+    dtheta = theta_grid[None, :, :] - theta[:, None, None]
+    dist_sq = dx * dx + dtheta * dtheta
+
+    exact_match = dist_sq == 0.0
+    weights = 1.0 / np.maximum(dist_sq, 1e-12) ** (power / 2.0)
+    weighted_sum = np.sum(weights * tof[:, None, None], axis=0)
+    weight_total = np.sum(weights, axis=0)
+    heat = weighted_sum / weight_total
+
+    # Preserve exact sample values at coincident grid locations.
+    if np.any(exact_match):
+        has_exact = np.any(exact_match, axis=0)
+        exact_values = np.sum(exact_match * tof[:, None, None], axis=0)
+        counts = np.sum(exact_match, axis=0)
+        heat[has_exact] = exact_values[has_exact] / counts[has_exact]
+
+    return theta_grid, x_grid, heat
+
+
+def default_export_path(csv_path: Path, interpolation_enabled: bool) -> Path:
+    plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
+    suffix = "interpolated" if interpolation_enabled else "scatter"
+    return plots_dir / f"{csv_path.stem}_tof_heatmap_{suffix}.png"
+
+
+def plot_interpolated_heatmap(
+    theta: np.ndarray,
+    x: np.ndarray,
+    tof: np.ndarray,
+    theta_grid: np.ndarray,
+    x_grid: np.ndarray,
+    heat: np.ndarray,
+    save_path: Path | None,
+    show_points: bool,
+) -> None:
     plt.figure(figsize=(10, 6))
 
     image = plt.imshow(
         heat,
         origin="lower",
         aspect="auto",
-        extent=[x.min(), x.max(), theta.min(), theta.max()],
+        extent=[float(np.min(x_grid)), float(np.max(x_grid)), float(np.min(theta_grid)), float(np.max(theta_grid))],
         cmap="viridis",
     )
 
+    if show_points:
+        plt.scatter(
+            x,
+            theta,
+            c=tof,
+            cmap="viridis",
+            s=12,
+            edgecolors="none",
+            alpha=0.8,
+        )
+
     plt.colorbar(image, label="Time of Flight (s)")
+    plt.xlabel("x axis position (mm)")
+    plt.ylabel("theta (deg)")
+    plt.title("Time of Flight Heatmap")
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=200)
+        print(f"Saved heatmap image to: {save_path}")
+
+    plt.show()
+
+
+def plot_scatter_heatmap(
+    theta: np.ndarray,
+    x: np.ndarray,
+    tof: np.ndarray,
+    save_path: Path | None,
+) -> None:
+    plt.figure(figsize=(10, 6))
+
+    points = plt.scatter(
+        x,
+        theta,
+        c=tof,
+        cmap="viridis",
+        s=18,
+        edgecolors="none",
+    )
+
+    plt.colorbar(points, label="Time of Flight (s)")
     plt.xlabel("x axis position (mm)")
     plt.ylabel("theta (deg)")
     plt.title("Time of Flight Heatmap")
@@ -152,8 +274,31 @@ def main() -> None:
         x_col=args.x_col,
         tof_col=args.tof_col,
     )
-    unique_theta, unique_x, heat = build_heatmap_grid(theta=theta, x=x, tof=tof)
-    plot_heatmap(theta=unique_theta, x=unique_x, heat=heat, save_path=args.save)
+    theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
+    interpolation_enabled = args.interpolation == "on"
+    save_path = args.save if args.save is not None else default_export_path(args.csv_file, interpolation_enabled)
+
+    if interpolation_enabled:
+        theta_grid, x_grid, heat = interpolate_idw(
+            theta=theta,
+            x=x,
+            tof=tof,
+            grid_width=args.grid_width,
+            grid_height=args.grid_height,
+            power=args.idw_power,
+        )
+        plot_interpolated_heatmap(
+            theta=theta,
+            x=x,
+            tof=tof,
+            theta_grid=theta_grid,
+            x_grid=x_grid,
+            heat=heat,
+            save_path=save_path,
+            show_points=not args.hide_points,
+        )
+    else:
+        plot_scatter_heatmap(theta=theta, x=x, tof=tof, save_path=save_path)
 
 
 if __name__ == "__main__":
