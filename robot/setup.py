@@ -1,8 +1,15 @@
-"""Robot setup helpers for TCP and payload configuration."""
+"""Robot setup helpers for TCP, payload, and collision tool configuration."""
 
 import time
 
-from config.robot_config import TCP_OFFSET, PAYLOAD_KG, COG
+from config.robot_config import (
+    TCP_OFFSET,
+    PAYLOAD_KG,
+    COG,
+    COLLISION_TOOL_TYPE,
+    COLLISION_TOOL_SIZE_MM,
+    COLLISION_TOOL_OFFSET_MM,
+)
 
 
 class RobotSetup:
@@ -31,8 +38,16 @@ class RobotSetup:
 
         return code
 
-    def configure(self, tcp_offset=None, payload=None, center_of_gravity=None):
-        """Configure TCP offset and payload parameters on the controller."""
+    def configure(
+        self,
+        tcp_offset=None,
+        payload=None,
+        center_of_gravity=None,
+        collision_tool_type=None,
+        collision_tool_size_mm=None,
+        collision_tool_offset_mm=None,
+    ):
+        """Configure TCP offset, payload, and tool collision model on the controller."""
 
         if tcp_offset is None:
             tcp_offset = TCP_OFFSET
@@ -42,6 +57,15 @@ class RobotSetup:
 
         if center_of_gravity is None:
             center_of_gravity = COG
+
+        if collision_tool_type is None:
+            collision_tool_type = COLLISION_TOOL_TYPE
+
+        if collision_tool_size_mm is None:
+            collision_tool_size_mm = COLLISION_TOOL_SIZE_MM
+
+        if collision_tool_offset_mm is None:
+            collision_tool_offset_mm = COLLISION_TOOL_OFFSET_MM
 
         print("Configuring robot...")
 
@@ -58,5 +82,32 @@ class RobotSetup:
             lambda: self.arm.set_tcp_load(payload, center_of_gravity, auto_enable=True),
         )
         print(f"Payload set: {payload} kg, CoG set: {center_of_gravity}")
+
+        if int(collision_tool_type) == 22:
+            x, y, z = [float(v) for v in collision_tool_size_mm]
+            x_offset, y_offset, z_offset = [float(v) for v in collision_tool_offset_mm]
+            self._apply_with_state_retry(
+                "set_collision_tool_model",
+                lambda: self.arm.set_collision_tool_model(
+                    int(collision_tool_type),
+                    x=x,
+                    y=y,
+                    z=z,
+                    x_offset=x_offset,
+                    y_offset=y_offset,
+                    z_offset=z_offset,
+                ),
+            )
+            print(
+                "Collision tool model set: "
+                f"type={collision_tool_type}, size_mm={[x, y, z]}, "
+                f"offset_mm={[x_offset, y_offset, z_offset]}"
+            )
+        else:
+            self._apply_with_state_retry(
+                "set_collision_tool_model",
+                lambda: self.arm.set_collision_tool_model(int(collision_tool_type)),
+            )
+            print(f"Collision tool model set: type={collision_tool_type}")
 
         print("Robot setup complete ✔")

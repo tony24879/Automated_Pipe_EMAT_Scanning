@@ -466,7 +466,7 @@ def run_horizontal_cylindrical_scan(
             print("Warning: unable to determine current pose for retreat; skipping reverse retreat")
             return
 
-        origin_x, origin_y, _origin_z, _origin_roll, _origin_pitch, _origin_yaw = startup_origin_pose
+        origin_x, origin_y, _origin_z, origin_roll, origin_pitch, origin_yaw = startup_origin_pose
         current_x, current_y, current_z, current_roll, current_pitch, current_yaw = retreat_pose
         safe_z = float(startup_safe_z)
         retreat_speed = min(float(speed), 30.0)
@@ -484,13 +484,14 @@ def run_horizontal_cylindrical_scan(
 
         retreat_moves = [
             (current_x, radial_out_y, radial_out_z, current_roll, current_pitch, current_yaw, "Radial outward nudge"),
-            (current_x, current_y, safe_z, current_roll, current_pitch, current_yaw, "Lift to clearance"),
-            (origin_x, origin_y, safe_z, current_roll, current_pitch, current_yaw, "Transit XY at clearance"),
+            (current_x, radial_out_y, safe_z, current_roll, current_pitch, current_yaw, "Lift to clearance"),
+            (current_x, radial_out_y, safe_z, origin_roll, origin_pitch, origin_yaw, "Realign tool to startup down-Z orientation"),
+            (origin_x, origin_y, safe_z, origin_roll, origin_pitch, origin_yaw, "Transit XY at clearance"),
         ]
 
         print(
             f"Executing reverse startup retreat after {reason}: "
-            f"radial-outward, up to z={safe_z:.1f}, across to startup XY, then controller reset"
+            f"radial-outward, up to z={safe_z:.1f}, realign to down-Z, across to startup XY, then controller reset"
         )
 
         for rx, ry, rz, rroll, rpitch, ryaw, label in retreat_moves:
