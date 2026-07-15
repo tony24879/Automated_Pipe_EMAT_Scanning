@@ -20,9 +20,10 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot a Time of Flight heatmap from a CSV file.")
     parser.add_argument(
-        "csv_file",
+        "csv_files",
         type=Path,
-        help="Path to the CSV file (for example: data/raw/sync_scan_20260701_121153.csv)",
+        nargs="+",
+        help="Path(s) to one or more CSV files (for example: data/raw/sync_scan_20260701_121153.csv)",
     )
     parser.add_argument(
         "--theta-col",
@@ -46,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         "--save",
         type=Path,
         default=None,
-        help="Optional output image path. If omitted, auto-saves to data/processed/plots.",
+        help="Optional output image path for a single CSV input, or output directory for multiple CSV inputs.",
     )
     parser.add_argument(
         "--grid-width",
@@ -195,6 +196,9 @@ def plot_interpolated_heatmap(
     heat: np.ndarray,
     save_path: Path | None,
     show_points: bool,
+    vmin: float,
+    vmax: float,
+    title: str,
 ) -> None:
     plt.figure(figsize=(10, 6))
 
@@ -204,6 +208,8 @@ def plot_interpolated_heatmap(
         aspect="auto",
         extent=[float(np.min(x_grid)), float(np.max(x_grid)), float(np.min(theta_grid)), float(np.max(theta_grid))],
         cmap="viridis",
+        vmin=vmin,
+        vmax=vmax,
     )
 
     if show_points:
@@ -215,12 +221,14 @@ def plot_interpolated_heatmap(
             s=12,
             edgecolors="none",
             alpha=0.8,
+            vmin=vmin,
+            vmax=vmax,
         )
 
-    plt.colorbar(image, label="Time of Flight (s)")
+    plt.colorbar(image, label="Error")
     plt.xlabel("x axis position (mm)")
     plt.ylabel("theta (deg)")
-    plt.title("Time of Flight Heatmap")
+    plt.title(title)
     plt.tight_layout()
 
     if save_path is not None:
@@ -236,6 +244,9 @@ def plot_scatter_heatmap(
     x: np.ndarray,
     tof: np.ndarray,
     save_path: Path | None,
+    vmin: float,
+    vmax: float,
+    title: str,
 ) -> None:
     plt.figure(figsize=(10, 6))
 
@@ -246,12 +257,14 @@ def plot_scatter_heatmap(
         cmap="viridis",
         s=18,
         edgecolors="none",
+        vmin=vmin,
+        vmax=vmax,
     )
 
-    plt.colorbar(points, label="Time of Flight (s)")
+    plt.colorbar(points, label="Error")
     plt.xlabel("x axis position (mm)")
     plt.ylabel("theta (deg)")
-    plt.title("Time of Flight Heatmap")
+    plt.title(title)
     plt.tight_layout()
 
     if save_path is not None:
@@ -264,41 +277,77 @@ def plot_scatter_heatmap(
 
 def main() -> None:
     args = parse_args()
-
-    if not args.csv_file.exists():
-        raise FileNotFoundError(f"CSV file not found: {args.csv_file}")
-
-    theta, x, tof = load_points(
-        csv_path=args.csv_file,
-        theta_col=args.theta_col,
-        x_col=args.x_col,
-        tof_col=args.tof_col,
-    )
-    theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
     interpolation_enabled = args.interpolation == "on"
-    save_path = args.save if args.save is not None else default_export_path(args.csv_file, interpolation_enabled)
+    csv_files = args.csv_files
 
-    if interpolation_enabled:
-        theta_grid, x_grid, heat = interpolate_idw(
-            theta=theta,
-            x=x,
-            tof=tof,
-            grid_width=args.grid_width,
-            grid_height=args.grid_height,
-            power=args.idw_power,
+    for csv_path in csv_files:
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    datasets: list[tuple[Path, np.ndarray, np.ndarray, np.ndarray]] = []
+    for csv_path in csv_files:
+        theta, x, tof = load_points(
+            csv_path=csv_path,
+            theta_col=args.theta_col,
+            x_col=args.x_col,
+            tof_col=args.tof_col,
         )
-        plot_interpolated_heatmap(
-            theta=theta,
-            x=x,
-            tof=tof,
-            theta_grid=theta_grid,
-            x_grid=x_grid,
-            heat=heat,
-            save_path=save_path,
-            show_points=not args.hide_points,
+        theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
+        datasets.append((csv_path, theta, x, tof))
+
+    global_min = float(min(np.min(tof) for _, _, _, tof in datasets))
+    global_max = float(max(np.max(tof) for _, _, _, tof in datasets))
+    if np.isclose(global_min, global_max):
+        global_max = global_min + 1e-12
+
+    if args.save is not None and len(datasets) > 1 and args.save.suffix:
+        raise ValueError(
+            "When plotting multiple CSV files, --save must be a directory path (no file extension)."
         )
-    else:
-        plot_scatter_heatmap(theta=theta, x=x, tof=tof, save_path=save_path)
+
+    for csv_path, theta, x, tof in datasets:
+        if args.save is None:
+            save_path = default_export_path(csv_path, interpolation_enabled)
+        elif len(datasets) == 1 and args.save.suffix:
+            save_path = args.save
+        else:
+            suffix = "interpolated" if interpolation_enabled else "scatter"
+            save_path = args.save / f"{csv_path.stem}_tof_heatmap_{suffix}.png"
+
+        title = f"ToF Error Heatmap: {csv_path.stem}"
+
+        if interpolation_enabled:
+            theta_grid, x_grid, heat = interpolate_idw(
+                theta=theta,
+                x=x,
+                tof=tof,
+                grid_width=args.grid_width,
+                grid_height=args.grid_height,
+                power=args.idw_power,
+            )
+            plot_interpolated_heatmap(
+                theta=theta,
+                x=x,
+                tof=tof,
+                theta_grid=theta_grid,
+                x_grid=x_grid,
+                heat=heat,
+                save_path=save_path,
+                show_points=not args.hide_points,
+                vmin=global_min,
+                vmax=global_max,
+                title=title,
+            )
+        else:
+            plot_scatter_heatmap(
+                theta=theta,
+                x=x,
+                tof=tof,
+                save_path=save_path,
+                vmin=global_min,
+                vmax=global_max,
+                title=title,
+            )
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ def compute_time_of_flight(row: list[str]) -> str:
     if peak_value is None or peak_column is None:
         return ""
 
-    return str((peak_column - 10) * TOF_SCALE_SECONDS)
+    return str(((peak_column - 10) * TOF_SCALE_SECONDS) - 0.00000085)
 
 
 def process_file(input_csv: Path) -> Path:

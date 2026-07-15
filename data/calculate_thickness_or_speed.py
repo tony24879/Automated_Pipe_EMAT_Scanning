@@ -48,7 +48,7 @@ def compute_result(mode: str, estimate: float, col10_value: float):
 
     if col10_value == 0:
         return ""
-    return (estimate / 2) / col10_value
+    return (estimate * 2) / col10_value
 
 
 def build_output_path(input_csv: Path, mode: str) -> Path:
