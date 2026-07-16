@@ -29,8 +29,9 @@ def resolve_input_path(raw_file: str) -> Path:
     return RAW_DIR / candidate
 
 
-def build_output_path(first_csv: Path, second_csv: Path) -> Path:
-    return RAW_DIR / f"{first_csv.stem}_{second_csv.stem}_errors.csv"
+def build_output_path(first_csv: Path, second_csv: Path, output_folder: Path | None = None) -> Path:
+    folder = RAW_DIR if output_folder is None else output_folder
+    return folder / f"{first_csv.stem}_{second_csv.stem}_errors.csv"
 
 
 def parse_numeric(cell: str, row_number: int, file_path: Path) -> float:
@@ -44,8 +45,9 @@ def parse_numeric(cell: str, row_number: int, file_path: Path) -> float:
         ) from exc
 
 
-def process_files(first_csv: Path, second_csv: Path) -> Path:
-    output_csv = build_output_path(first_csv, second_csv)
+def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None = None) -> Path:
+    output_csv = build_output_path(first_csv, second_csv, output_folder=output_folder)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     with first_csv.open("r", newline="", encoding="utf-8") as first_file, second_csv.open(
         "r", newline="", encoding="utf-8"
@@ -113,6 +115,12 @@ def main() -> None:
         "second_csv",
         help="Second input CSV filename in data/raw (or absolute path).",
     )
+    parser.add_argument(
+        "--output-folder",
+        type=Path,
+        default=None,
+        help="Optional output folder for the generated *_errors CSV.",
+    )
     args = parser.parse_args()
 
     first_csv = resolve_input_path(args.first_csv)
@@ -123,7 +131,7 @@ def main() -> None:
     if not second_csv.exists():
         raise FileNotFoundError(f"Second input CSV not found: {second_csv}")
 
-    process_files(first_csv, second_csv)
+    process_files(first_csv, second_csv, output_folder=args.output_folder)
 
 
 if __name__ == "__main__":

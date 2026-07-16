@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import argparse
 from pathlib import Path
 
 from config.robot_config import ROBOT_IP
@@ -443,7 +444,7 @@ def save_calibration(
     Path(filename).write_text(json.dumps(calibration, indent=2))
 
 
-def main():
+def main(surface_points=None):
     """Guide operator through horizontal-cylinder calibration and save geometry."""
     calibration_file = Path("data/raw/cylinder_calibration_horizontal.json")
     calibration_file.parent.mkdir(parents=True, exist_ok=True)
@@ -466,10 +467,14 @@ def main():
         print("For top-surface-only scans, keep these two limits within about 180 degrees span.")
 
         default_count = 18
-        taught_count_text = input(
-            f"How many surface points to teach? (recommended >= 18, default {default_count}): "
-        ).strip()
-        taught_count = default_count if not taught_count_text else int(taught_count_text)
+        if surface_points is None:
+            taught_count_text = input(
+                f"How many surface points to teach? (recommended >= 18, default {default_count}): "
+            ).strip()
+            taught_count = default_count if not taught_count_text else int(taught_count_text)
+        else:
+            taught_count = int(surface_points)
+            print(f"Using surface point count from CLI: {taught_count}")
         taught_count = max(8, taught_count)
 
         circ_points = []
@@ -637,4 +642,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run horizontal cylinder calibration")
+    parser.add_argument(
+        "--surface-points",
+        type=int,
+        default=None,
+        help="Number of surface points to teach before fitting",
+    )
+    args = parser.parse_args()
+    main(surface_points=args.surface_points)

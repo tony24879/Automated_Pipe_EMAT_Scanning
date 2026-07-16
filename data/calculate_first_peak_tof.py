@@ -39,8 +39,9 @@ def resolve_input_path(raw_file: str) -> Path:
     return RAW_DIR / candidate
 
 
-def build_output_path(input_csv: Path) -> Path:
-    return PROCESSED_DIR / f"{input_csv.stem}_first_peak_tof{input_csv.suffix}"
+def build_output_path(input_csv: Path, output_folder: Path | None = None) -> Path:
+    folder = PROCESSED_DIR if output_folder is None else output_folder
+    return folder / f"{input_csv.stem}_first_peak_tof{input_csv.suffix}"
 
 
 def compute_time_of_flight(row: list[str]) -> str:
@@ -71,9 +72,9 @@ def compute_time_of_flight(row: list[str]) -> str:
     return str(((peak_column - 10) * TOF_SCALE_SECONDS) - 0.00000085)
 
 
-def process_file(input_csv: Path) -> Path:
-    output_csv = build_output_path(input_csv)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+def process_file(input_csv: Path, output_folder: Path | None = None) -> Path:
+    output_csv = build_output_path(input_csv, output_folder=output_folder)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     with input_csv.open("r", newline="", encoding="utf-8") as source_file, output_csv.open(
         "w", newline="", encoding="utf-8"
@@ -116,13 +117,19 @@ def main() -> None:
         default="sync_scan_20260709_112954.csv",
         help="Input CSV file name in data/raw (or an absolute path).",
     )
+    parser.add_argument(
+        "--output-folder",
+        type=Path,
+        default=None,
+        help="Optional output folder for the *_first_peak_tof CSV.",
+    )
     args = parser.parse_args()
 
     input_csv = resolve_input_path(args.input_csv)
     if not input_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 
-    process_file(input_csv)
+    process_file(input_csv, output_folder=args.output_folder)
 
 
 if __name__ == "__main__":

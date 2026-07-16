@@ -1,3 +1,4 @@
+import argparse
 import csv
 from pathlib import Path
 
@@ -56,17 +57,67 @@ def build_output_path(input_csv: Path, mode: str) -> Path:
     return PROCESSED_DIR / f"{input_csv.stem}{suffix}.csv"
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Calculate thickness or speed from column-10 values in a CSV."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["thickness", "speed"],
+        default=None,
+        help="Calculation mode. If omitted, script prompts interactively.",
+    )
+    parser.add_argument(
+        "--estimate",
+        type=float,
+        default=None,
+        help="Other parameter estimate (speed estimate for thickness mode, thickness estimate for speed mode).",
+    )
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        default=None,
+        help="Input CSV path. If relative, it is resolved against data/raw.",
+    )
+    parser.add_argument(
+        "--output-folder",
+        type=Path,
+        default=None,
+        help="Optional output folder. Defaults to data/processed.",
+    )
+    return parser.parse_args()
+
+
+def resolve_input_csv(input_csv: Path | None) -> Path | None:
+    if input_csv is None:
+        return None
+    if input_csv.is_absolute():
+        return input_csv
+    return RAW_DIR / input_csv
+
+
 def main() -> None:
-    mode = prompt_mode()
+    args = parse_args()
 
-    if mode == "thickness":
-        estimate = prompt_float("Enter speed estimate: ")
+    mode = args.mode if args.mode is not None else prompt_mode()
+
+    if args.estimate is not None:
+        estimate = float(args.estimate)
     else:
-        estimate = prompt_float("Enter tickness estimate: ")
+        if mode == "thickness":
+            estimate = prompt_float("Enter speed estimate: ")
+        else:
+            estimate = prompt_float("Enter tickness estimate: ")
 
-    input_csv = prompt_input_file()
-    output_csv = build_output_path(input_csv, mode)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    input_csv = resolve_input_csv(args.input_csv)
+    if input_csv is None:
+        input_csv = prompt_input_file()
+    elif not (input_csv.exists() and input_csv.is_file() and input_csv.suffix.lower() == ".csv"):
+        raise FileNotFoundError(f"CSV file not found: {input_csv}")
+
+    output_folder = PROCESSED_DIR if args.output_folder is None else args.output_folder
+    output_folder.mkdir(parents=True, exist_ok=True)
+    output_csv = output_folder / build_output_path(input_csv, mode).name
 
     result_header = "Thickness" if mode == "thickness" else "Speed of Sound"
     rows_written = 0

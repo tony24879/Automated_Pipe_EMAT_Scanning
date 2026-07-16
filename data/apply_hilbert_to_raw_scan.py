@@ -55,9 +55,13 @@ def parse_signal_columns(row: List[str]) -> List[float]:
     return values
 
 
-def process_file(input_path: Path) -> Path:
+def process_file(input_path: Path, output_folder: Path | None = None) -> Path:
     """Process one input CSV and write a sibling *_hilbert.csv file."""
-    output_path = input_path.with_name(f"{input_path.stem}_hilbert{input_path.suffix}")
+    if output_folder is None:
+        output_path = input_path.with_name(f"{input_path.stem}_hilbert{input_path.suffix}")
+    else:
+        output_folder.mkdir(parents=True, exist_ok=True)
+        output_path = output_folder / f"{input_path.stem}_hilbert{input_path.suffix}"
 
     with input_path.open("r", newline="", encoding="utf-8") as infile, output_path.open(
         "w", newline="", encoding="utf-8"
@@ -118,13 +122,19 @@ def main() -> None:
         default="sync_scan_20260709_112954.csv",
         help="Input CSV file name in data/raw (or an absolute path).",
     )
+    parser.add_argument(
+        "--output-folder",
+        type=Path,
+        default=None,
+        help="Optional output folder for the *_hilbert CSV.",
+    )
     args = parser.parse_args()
 
     input_path = resolve_input_path(args.input_csv)
     if not input_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
-    output_path = process_file(input_path)
+    output_path = process_file(input_path, output_folder=args.output_folder)
     print(f"Wrote Hilbert-processed CSV: {output_path}")
 
 
