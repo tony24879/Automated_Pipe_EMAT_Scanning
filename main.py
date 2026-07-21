@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import tkinter as tk
@@ -11,6 +12,69 @@ from tkinter import messagebox
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _format_duration(seconds: float) -> str:
+	"""Format a duration as h:mm:ss or m:ss for the scan estimate display."""
+	total_seconds = max(0, int(round(seconds)))
+	hours, remainder = divmod(total_seconds, 3600)
+	minutes, secs = divmod(remainder, 60)
+	if hours:
+		return f"{hours}h {minutes:02d}m {secs:02d}s"
+	if minutes:
+		return f"{minutes}m {secs:02d}s"
+	return f"{secs}s"
+
+
+def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[float, float, float, int, int]:
+	"""Estimate horizontal scan duration using the generated motion path."""
+	from scans.cylindrical_scan_horizontal import HorizontalCylindricalScanPlanner, _read_horizontal_calibration_geometry
+
+	calibration = _read_horizontal_calibration_geometry("cylinder_calibration_horizontal.json")
+	if calibration is not None:
+		centre = calibration["centre"]
+		radius = calibration["radius"]
+		length = calibration["length"]
+		x_start = calibration["x_start"]
+		x_end = calibration["x_end"]
+		theta_limit_a_deg = calibration["theta_limit_a_deg"]
+		theta_limit_b_deg = calibration["theta_limit_b_deg"]
+	else:
+		centre = [250.0, 0.0, 150.0]
+		radius = 50.0
+		length = 150.0
+		x_start = centre[0]
+		x_end = centre[0] + length
+		theta_limit_a_deg = 0.0
+		theta_limit_b_deg = 180.0
+
+	planner = HorizontalCylindricalScanPlanner(
+		centre=centre,
+		radius=radius,
+		length=length,
+		lift_off=0.0,
+		outer_offset_mm=0.0,
+		x_start=x_start,
+		x_end=x_end,
+		theta_limit_a_deg=theta_limit_a_deg,
+		theta_limit_b_deg=theta_limit_b_deg,
+		scan_points_per_x=theta_steps,
+		x_scans=axis_steps,
+	)
+
+	points = planner.generate()
+	travel_distance_mm = sum(math.dist(start[:3], end[:3]) for start, end in zip(points, points[1:]))
+	motion_point_count = len(points)
+	speed = 40.0
+	travel_seconds = (travel_distance_mm / speed) + (0.2 * motion_point_count)
+	capture_count = sum(1 for *_, capture in points if capture)
+	emat_averages = 1000
+	block_seconds = emat_averages / 1000.0
+	dwell = 0.5
+	a = math.ceil(dwell / block_seconds)
+	capture_seconds = capture_count * ((a * block_seconds) + (a * 0.1))
+	total_seconds = travel_seconds + capture_seconds
+	return total_seconds, travel_seconds, capture_seconds, motion_point_count, capture_count
 
 
 def _launch_script(script_relative_path: str, args: list[str]) -> None:
@@ -126,8 +190,35 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 	axis_entry.grid(row=3, column=0, sticky="we", pady=(4, 10))
 	theta_entry.focus_set()
 
+	estimate_var = tk.StringVar(value="Estimated scan time: not calculated yet.")
+	tk.Label(frame, textvariable=estimate_var, justify="left", wraplength=260).grid(row=4, column=0, sticky="w", pady=(0, 10))
+
 	buttons = tk.Frame(frame)
-	buttons.grid(row=4, column=0, sticky="e")
+	buttons.grid(row=5, column=0, sticky="e")
+
+	def on_estimate_scan_time() -> None:
+		try:
+			theta_steps = int(theta_var.get().strip())
+			axis_steps = int(axis_var.get().strip())
+		except ValueError:
+			messagebox.showerror("Invalid Input", "Theta and axis steps must be integers.", parent=dialog)
+			return
+		if theta_steps <= 0 or axis_steps <= 0:
+			messagebox.showerror("Invalid Input", "Theta and axis steps must be greater than 0.", parent=dialog)
+			return
+
+		try:
+			total_seconds, travel_seconds, capture_seconds, motion_points, capture_points = _estimate_horizontal_scan_time(theta_steps, axis_steps)
+		except Exception as exc:
+			messagebox.showerror("Estimate Error", f"Unable to estimate scan time:\n{exc}", parent=dialog)
+			return
+
+		estimate_var.set(
+			"Estimated scan time: "
+			f"{_format_duration(total_seconds)} "
+			f"(travel {_format_duration(travel_seconds)}, captures {_format_duration(capture_seconds)}, "
+			f"{motion_points} motion points, {capture_points} capture points)"
+		)
 
 	def on_run_scan() -> None:
 		try:
@@ -162,8 +253,10 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 		dialog.destroy()
 
 	tk.Button(buttons, text="Cancel", width=12, command=dialog.destroy).pack(side="left", padx=(0, 8))
+	tk.Button(buttons, text="Estimate Scan Time", width=18, command=on_estimate_scan_time).pack(side="left", padx=(0, 8))
 	tk.Button(buttons, text="Run Scan", width=12, command=on_run_scan).pack(side="left")
 
+	dialog.bind("<Control-Return>", lambda _event: on_estimate_scan_time())
 	dialog.bind("<Return>", lambda _event: on_run_scan())
 	dialog.bind("<Escape>", lambda _event: dialog.destroy())
 

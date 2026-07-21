@@ -21,8 +21,8 @@ from pathlib import Path
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "processed"
 
-FIRST_SIGNAL_COL = 310
-LAST_SIGNAL_COL = 390
+FIRST_SIGNAL_COL = 300 #310
+LAST_SIGNAL_COL = 400 #390
 TOF_SCALE_SECONDS = 20e-9
 
 
