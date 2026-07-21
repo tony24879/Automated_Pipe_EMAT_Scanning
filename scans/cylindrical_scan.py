@@ -379,7 +379,11 @@ def run_cylindrical_scan(
     setup = RobotSetup(arm)
     setup.configure()
 
-    plotter = LiveWaveformPlot()
+    plotter = None
+    try:
+        plotter = LiveWaveformPlot()
+    except Exception as exc:
+        print(f"Warning: unable to initialize live waveform plot ({exc}); continuing without live plot")
     logger = SyncLogger(folder=output_folder)
 
     try:
@@ -451,7 +455,8 @@ def run_cylindrical_scan(
                     data = None
                     while time.monotonic() < dwell_until:
                         data = emat.acquire()
-                        plotter.update(data)
+                        if plotter is not None:
+                            plotter.update(data)
                         time.sleep(0.1)
 
                     pose = robot.get_pose()
@@ -460,7 +465,8 @@ def run_cylindrical_scan(
 
             print("Cylindrical scan complete")
     finally:
-        plotter.close()
+        if plotter is not None:
+            plotter.close()
         logger.close()
         conn.disconnect()
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.interpolate import griddata
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,14 +53,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--grid-width",
         type=int,
-        default=300,
-        help="Interpolated grid width in pixels (default: 300)",
+        default=500,
+        help="Interpolated grid width in pixels (default: 500)",
     )
     parser.add_argument(
         "--grid-height",
         type=int,
-        default=300,
-        help="Interpolated grid height in pixels (default: 300)",
+        default=500,
+        help="Interpolated grid height in pixels (default: 500)",
     )
     parser.add_argument(
         "--idw-power",
@@ -68,15 +69,50 @@ def parse_args() -> argparse.Namespace:
         help="Inverse-distance interpolation power (default: 2.0)",
     )
     parser.add_argument(
+        "--interpolation-method",
+        choices=["cubic", "linear", "idw"],
+        default="cubic",
+        help="Interpolation method used to build the heatmap surface (default: cubic)",
+    )
+    parser.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=0.8,
+        help="Gaussian smoothing sigma applied to the interpolated grid in pixels (default: 0.8)",
+    )
+    parser.add_argument(
+        "--show-points",
+        action="store_true",
+        help="Overlay original scatter points on top of the interpolated map.",
+    )
+    parser.add_argument(
         "--hide-points",
         action="store_true",
-        help="Hide original scatter points and only show the interpolated map.",
+        help="Deprecated alias for compatibility; interpolated plots hide points by default.",
     )
     parser.add_argument(
         "--interpolation",
         choices=["on", "off"],
         default="on",
         help="Turn interpolation on/off (default: on)",
+    )
+    parser.add_argument(
+        "--image-interpolation",
+        choices=["nearest", "bilinear", "bicubic", "lanczos"],
+        default="bicubic",
+        help="Matplotlib image resampling mode for the interpolated heatmap (default: bicubic)",
+    )
+    parser.add_argument(
+        "--title-prefix",
+        type=str,
+        default="ToF Error Heatmap",
+        help="Title text to place before the CSV filename.",
+    )
+    parser.add_argument(
+        "--cbar-label",
+        type=str,
+        default="ToF Error",
+        help="Label for the color bar.",
     )
     return parser.parse_args()
 
@@ -181,6 +217,57 @@ def interpolate_idw(
     return theta_grid, x_grid, heat
 
 
+def interpolate_griddata(
+    theta: np.ndarray,
+    x: np.ndarray,
+    tof: np.ndarray,
+    grid_width: int,
+    grid_height: int,
+    method: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if grid_width < 2 or grid_height < 2:
+        raise ValueError("Grid width and height must both be >= 2.")
+
+    x_lin = np.linspace(float(np.min(x)), float(np.max(x)), grid_width)
+    theta_lin = np.linspace(float(np.min(theta)), float(np.max(theta)), grid_height)
+    x_grid, theta_grid = np.meshgrid(x_lin, theta_lin)
+
+    points = np.column_stack((x, theta))
+    heat = griddata(points, tof, (x_grid, theta_grid), method=method)
+
+    if np.isnan(heat).any():
+        nearest = griddata(points, tof, (x_grid, theta_grid), method="nearest")
+        heat = np.where(np.isnan(heat), nearest, heat)
+
+    return theta_grid, x_grid, np.asarray(heat, dtype=float)
+
+
+def _gaussian_kernel1d(sigma: float) -> np.ndarray:
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    offsets = np.arange(-radius, radius + 1, dtype=float)
+    kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+    kernel /= np.sum(kernel)
+    return kernel
+
+
+def _convolve_along_axis(array: np.ndarray, kernel: np.ndarray, axis: int) -> np.ndarray:
+    radius = len(kernel) // 2
+    pad_width = [(0, 0)] * array.ndim
+    pad_width[axis] = (radius, radius)
+    padded = np.pad(array, pad_width, mode="edge")
+    return np.apply_along_axis(lambda values: np.convolve(values, kernel, mode="valid"), axis, padded)
+
+
+def smooth_heatmap(heat: np.ndarray, sigma: float) -> np.ndarray:
+    if sigma <= 0:
+        return heat
+
+    kernel = _gaussian_kernel1d(sigma)
+    smoothed = _convolve_along_axis(heat, kernel, axis=0)
+    smoothed = _convolve_along_axis(smoothed, kernel, axis=1)
+    return smoothed
+
+
 def default_export_path(csv_path: Path, interpolation_enabled: bool) -> Path:
     plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
     suffix = "interpolated" if interpolation_enabled else "scatter"
@@ -196,9 +283,11 @@ def plot_interpolated_heatmap(
     heat: np.ndarray,
     save_path: Path | None,
     show_points: bool,
+    image_interpolation: str,
     vmin: float,
     vmax: float,
     title: str,
+    cbar_label: str,
 ) -> None:
     plt.figure(figsize=(10, 6))
 
@@ -208,6 +297,7 @@ def plot_interpolated_heatmap(
         aspect="auto",
         extent=[float(np.min(x_grid)), float(np.max(x_grid)), float(np.min(theta_grid)), float(np.max(theta_grid))],
         cmap="viridis",
+        interpolation=image_interpolation,
         vmin=vmin,
         vmax=vmax,
     )
@@ -225,7 +315,7 @@ def plot_interpolated_heatmap(
             vmax=vmax,
         )
 
-    plt.colorbar(image, label="Error")
+    plt.colorbar(image, label=cbar_label)
     plt.xlabel("x axis position (mm)")
     plt.ylabel("theta (deg)")
     plt.title(title)
@@ -247,6 +337,7 @@ def plot_scatter_heatmap(
     vmin: float,
     vmax: float,
     title: str,
+    cbar_label: str,
 ) -> None:
     plt.figure(figsize=(10, 6))
 
@@ -261,7 +352,7 @@ def plot_scatter_heatmap(
         vmax=vmax,
     )
 
-    plt.colorbar(points, label="Error")
+    plt.colorbar(points, label=cbar_label)
     plt.xlabel("x axis position (mm)")
     plt.ylabel("theta (deg)")
     plt.title(title)
@@ -314,17 +405,32 @@ def main() -> None:
             suffix = "interpolated" if interpolation_enabled else "scatter"
             save_path = args.save / f"{csv_path.stem}_tof_heatmap_{suffix}.png"
 
-        title = f"ToF Error Heatmap: {csv_path.stem}"
+        title_prefix = args.title_prefix.strip()
+        if title_prefix:
+            title = f"{title_prefix}: {csv_path.stem}"
+        else:
+            title = csv_path.stem
 
         if interpolation_enabled:
-            theta_grid, x_grid, heat = interpolate_idw(
-                theta=theta,
-                x=x,
-                tof=tof,
-                grid_width=args.grid_width,
-                grid_height=args.grid_height,
-                power=args.idw_power,
-            )
+            if args.interpolation_method == "idw":
+                theta_grid, x_grid, heat = interpolate_idw(
+                    theta=theta,
+                    x=x,
+                    tof=tof,
+                    grid_width=args.grid_width,
+                    grid_height=args.grid_height,
+                    power=args.idw_power,
+                )
+            else:
+                theta_grid, x_grid, heat = interpolate_griddata(
+                    theta=theta,
+                    x=x,
+                    tof=tof,
+                    grid_width=args.grid_width,
+                    grid_height=args.grid_height,
+                    method=args.interpolation_method,
+                )
+            heat = smooth_heatmap(heat=heat, sigma=args.smooth_sigma)
             plot_interpolated_heatmap(
                 theta=theta,
                 x=x,
@@ -333,10 +439,12 @@ def main() -> None:
                 x_grid=x_grid,
                 heat=heat,
                 save_path=save_path,
-                show_points=not args.hide_points,
+                show_points=args.show_points and not args.hide_points,
+                image_interpolation=args.image_interpolation,
                 vmin=global_min,
                 vmax=global_max,
                 title=title,
+                cbar_label=args.cbar_label,
             )
         else:
             plot_scatter_heatmap(
@@ -347,6 +455,7 @@ def main() -> None:
                 vmin=global_min,
                 vmax=global_max,
                 title=title,
+                cbar_label=args.cbar_label,
             )
 
 

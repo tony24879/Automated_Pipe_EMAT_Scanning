@@ -416,7 +416,11 @@ def run_horizontal_cylindrical_scan(
     setup = RobotSetup(arm)
     setup.configure()
 
-    plotter = LiveWaveformPlot()
+    plotter = None
+    try:
+        plotter = LiveWaveformPlot()
+    except Exception as exc:
+        print(f"Warning: unable to initialize live waveform plot ({exc}); continuing without live plot")
     view3d = None
     if enable_3d_view:
         try:
@@ -605,7 +609,8 @@ def run_horizontal_cylindrical_scan(
                         data = None
                         while time.monotonic() < dwell_until:
                             data = emat.acquire()
-                            plotter.update(data)
+                            if plotter is not None:
+                                plotter.update(data)
                             if view3d is not None:
                                 view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
                             time.sleep(0.1)
@@ -638,7 +643,8 @@ def run_horizontal_cylindrical_scan(
             if pending_exception is not None:
                 raise pending_exception
     finally:
-        plotter.close()
+        if plotter is not None:
+            plotter.close()
         if view3d is not None:
             view3d.close()
         logger.close()
