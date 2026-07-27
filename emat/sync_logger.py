@@ -4,6 +4,8 @@ import os
 import csv
 import time
 
+from scipy.signal import find_peaks
+
 
 class SyncLogger:
     """Persist time-aligned robot and EMAT samples to disk."""
@@ -64,7 +66,7 @@ class SyncLogger:
         self._header_written = True
 
     def _compute_time_of_flight(self, signal_values):
-        """Compute TOF from peak index difference in two fixed sample windows."""
+        """Compute TOF from the first two detected peaks after initial noise."""
         samples = []
         for value in signal_values:
             try:
@@ -72,21 +74,26 @@ class SyncLogger:
             except (TypeError, ValueError):
                 return ""
 
-        # Need at least through index 690 for the second peak window.
-        if len(samples) <= 690:
+        skip_samples = 150
+        min_peak_distance = 100
+        min_prominence = 500
+
+        if len(samples) <= skip_samples + 1:
             return ""
 
-        first_start, first_end = 300, 380
-        second_start, second_end = 610, 690
+        post_noise = samples[skip_samples:]
 
-        first_window = samples[first_start:first_end + 1]
-        second_window = samples[second_start:second_end + 1]
-
-        if not first_window or not second_window:
+        if not post_noise:
             return ""
 
-        first_peak_index = first_start + max(range(len(first_window)), key=first_window.__getitem__)
-        second_peak_index = second_start + max(range(len(second_window)), key=second_window.__getitem__)
+        # Only detect local positive maxima (not minima/troughs).
+        peak_indices, _ = find_peaks(post_noise, distance=min_peak_distance, prominence=min_prominence)
+
+        if len(peak_indices) < 2:
+            return ""
+
+        first_peak_index = skip_samples + int(peak_indices[0])
+        second_peak_index = skip_samples + int(peak_indices[1])
 
         sample_difference = second_peak_index - first_peak_index
         return sample_difference * (20e-9)

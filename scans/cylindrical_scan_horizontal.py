@@ -226,6 +226,17 @@ def _read_horizontal_calibration_geometry(calibration_file):
     theta_a = float(payload["theta_limit_a_deg"])
     theta_b = float(payload["theta_limit_b_deg"])
 
+    acceptance_gate = payload.get("acceptance_gate") if isinstance(payload, dict) else None
+    gate_passed = True
+    gate_failures = []
+    if isinstance(acceptance_gate, dict):
+        gate_passed = bool(acceptance_gate.get("passed", True))
+        failures = acceptance_gate.get("failures", [])
+        if isinstance(failures, list):
+            gate_failures = [str(item) for item in failures]
+
+    fit_version = str(payload.get("fit_version", "unknown"))
+
     return {
         "resolved_file": resolved_file,
         "centre": centre,
@@ -235,6 +246,9 @@ def _read_horizontal_calibration_geometry(calibration_file):
         "x_end": x_end,
         "theta_limit_a_deg": theta_a,
         "theta_limit_b_deg": theta_b,
+        "fit_version": fit_version,
+        "acceptance_gate_passed": gate_passed,
+        "acceptance_gate_failures": gate_failures,
     }
 
 
@@ -371,6 +385,7 @@ def run_horizontal_cylindrical_scan(
     view_3d_backend="auto",
     robot_mesh_dir="3Dview/meshes/lite6",
     robot_mesh_scale=1.0,
+    allow_failed_calibration=False,
 ):
     """Execute horizontal cylindrical scan and log synchronized EMAT + robot data."""
     calibration = _read_horizontal_calibration_geometry(calibration_file)
@@ -382,12 +397,26 @@ def run_horizontal_cylindrical_scan(
         x_end = calibration["x_end"]
         theta_limit_a_deg = calibration["theta_limit_a_deg"]
         theta_limit_b_deg = calibration["theta_limit_b_deg"]
+        gate_passed = bool(calibration.get("acceptance_gate_passed", True))
+        gate_failures = calibration.get("acceptance_gate_failures", []) or []
+        fit_version = calibration.get("fit_version", "unknown")
 
         print(f"Using horizontal geometry from {calibration['resolved_file']}")
+        print(f"Calibration fit version: {fit_version}")
         print(f"Calibrated centre: x={centre[0]:.1f}, y={centre[1]:.1f}, z={centre[2]:.1f}")
         print(f"Calibrated radius: {radius:.1f} mm")
         print(f"Calibrated x range: {x_start:.1f} mm to {x_end:.1f} mm")
         print(f"Theta limits: {theta_limit_a_deg:.1f} deg -> {theta_limit_b_deg:.1f} deg")
+
+        if not gate_passed:
+            print("Warning: calibration acceptance gate status is FAIL")
+            for failure in gate_failures:
+                print(f"  - {failure}")
+            if not allow_failed_calibration:
+                raise RuntimeError(
+                    "Refusing to run scan with failed calibration. "
+                    "Re-run calibration or pass --allow-failed-calibration to override."
+                )
     else:
         x_start = centre[0]
         x_end = centre[0] + length
@@ -657,7 +686,7 @@ if __name__ == "__main__":
     parser.add_argument("--radius", type=float, default=50.0, help="Cylinder radius in mm")
     parser.add_argument("--length", type=float, default=150.0, help="Cylinder scan length along x in mm")
     parser.add_argument("--lift-off", type=float, default=0.0, help="Radial lift-off from cylinder surface in mm")
-    parser.add_argument("--outer-offset-mm", type=float, default=0.0, help="Extra radial offset for transition ring in mm")
+    parser.add_argument("--outer-offset-mm", type=float, default=10.0, help="Extra radial offset for transition ring in mm")
     parser.add_argument("--theta-limit-a-deg", type=float, default=0.0, help="First angular limit in yz-plane degrees")
     parser.add_argument("--theta-limit-b-deg", type=float, default=180.0, help="Second angular limit in yz-plane degrees")
     parser.add_argument("--dwell", type=float, default=0.5, help="Seconds to dwell at each point")
@@ -685,6 +714,11 @@ if __name__ == "__main__":
         type=float,
         default=1.0,
         help="Uniform STL scale factor for mesh backend",
+    )
+    parser.add_argument(
+        "--allow-failed-calibration",
+        action="store_true",
+        help="Allow scan to continue even if calibration acceptance gate failed",
     )
     args = parser.parse_args()
 
@@ -714,4 +748,5 @@ if __name__ == "__main__":
         view_3d_backend=args.view_3d_backend,
         robot_mesh_dir=args.robot_mesh_dir,
         robot_mesh_scale=args.robot_mesh_scale,
+        allow_failed_calibration=args.allow_failed_calibration,
     )

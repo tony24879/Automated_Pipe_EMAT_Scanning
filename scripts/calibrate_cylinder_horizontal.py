@@ -374,6 +374,127 @@ def _fit_cylinder_3d(points, max_iters=20):
     return fit
 
 
+def _fit_horizontal_cylinder_constrained(points, max_iters=20):
+    """Robust fit constrained to a horizontal cylinder axis (parallel to +X)."""
+    if len(points) < 8:
+        raise ValueError("At least 8 taught surface points are recommended for robust horizontal fitting")
+
+    yz_points = [(float(p[1]), float(p[2])) for p in points]
+    weights = [1.0 for _ in yz_points]
+    prev_rms = None
+
+    for _ in range(max_iters):
+        cy, cz, radius = _fit_circle_2d_weighted(yz_points, weights)
+        residuals = []
+        for y, z in yz_points:
+            radial = math.hypot(y - cy, z - cz)
+            residuals.append(radial - radius)
+
+        abs_res = [abs(r) for r in residuals]
+        sigma = max(1e-6, 1.4826 * _median(abs_res))
+        c = 1.5 * sigma
+
+        new_weights = []
+        for r in residuals:
+            ar = abs(r)
+            if ar <= c:
+                new_weights.append(1.0)
+            else:
+                new_weights.append(c / ar)
+
+        rms = math.sqrt(sum(r * r for r in residuals) / len(residuals))
+        if prev_rms is not None and abs(prev_rms - rms) < 1e-5:
+            weights = new_weights
+            break
+
+        prev_rms = rms
+        weights = new_weights
+
+    cy, cz, radius = _fit_circle_2d_weighted(yz_points, weights)
+    residuals = []
+    for y, z in yz_points:
+        radial = math.hypot(y - cy, z - cz)
+        residuals.append(radial - radius)
+
+    abs_res = [abs(r) for r in residuals]
+    sigma = max(1e-6, 1.4826 * _median(abs_res))
+    inlier_thresh = 2.5 * sigma
+    inlier_count = sum(1 for a in abs_res if a <= inlier_thresh)
+
+    return {
+        "centre_yz": [float(cy), float(cz)],
+        "radius": float(radius),
+        "residuals": residuals,
+        "weights": weights,
+        "sigma": sigma,
+        "inlier_count": inlier_count,
+        "total_count": len(points),
+        "rms_radial_error_mm": math.sqrt(sum(r * r for r in residuals) / len(residuals)),
+        "p95_radial_error_mm": _percentile(abs_res, 0.95),
+    }
+
+
+def _bootstrap_horizontal_confidence(points, bootstrap_samples=200):
+    """Estimate confidence intervals for constrained horizontal-cylinder radius."""
+    if len(points) < 8:
+        return None
+
+    radii = []
+    n = len(points)
+
+    for _ in range(bootstrap_samples):
+        sample = [points[random.randint(0, n - 1)] for _ in range(n)]
+        try:
+            fit = _fit_horizontal_cylinder_constrained(sample, max_iters=10)
+        except ValueError:
+            continue
+        radii.append(float(fit["radius"]))
+
+    if len(radii) < 20:
+        return None
+
+    return {
+        "radius_ci95_mm": [_percentile(radii, 0.025), _percentile(radii, 0.975)],
+        "axis_tilt_ci95_deg": [0.0, 0.0],
+        "bootstrap_count": len(radii),
+    }
+
+
+def _prompt_theta_limit_indices(point_count):
+    """Prompt operator to choose which taught points define angular sweep limits."""
+    default_a = 1
+    default_b = 2
+
+    while True:
+        raw = input(
+            "Enter two taught point numbers to define theta limits [default: 1,2]: "
+        ).strip()
+        if not raw:
+            return default_a - 1, default_b - 1
+
+        cleaned = raw.replace(";", ",").replace(" ", "")
+        parts = [p for p in cleaned.split(",") if p]
+        if len(parts) != 2:
+            print("Please provide exactly two integers, e.g. 1,2")
+            continue
+
+        try:
+            a = int(parts[0])
+            b = int(parts[1])
+        except ValueError:
+            print("Point numbers must be integers")
+            continue
+
+        if a == b:
+            print("Theta limit points must be different")
+            continue
+        if a < 1 or b < 1 or a > point_count or b > point_count:
+            print(f"Point numbers must be within 1..{point_count}")
+            continue
+
+        return a - 1, b - 1
+
+
 def _bootstrap_cylinder_confidence(points, bootstrap_samples=200):
     """Estimate confidence intervals for radius and axis tilt via bootstrap."""
     if len(points) < 8:
@@ -500,9 +621,7 @@ def main(surface_points=None):
         conn.disconnect()
 
     fit_points = [[float(p[0]), float(p[1]), float(p[2])] for p in circ_points]
-    fit = _fit_cylinder_3d(fit_points)
-    axis_point = fit["axis_point"]
-    axis_direction = _normalize(fit["axis_direction"])
+    fit = _fit_horizontal_cylinder_constrained(fit_points)
     radius = float(fit["radius"])
     residuals = fit["residuals"]
 
@@ -511,24 +630,23 @@ def main(surface_points=None):
     x_end = max(float(x_start_pose[0]), float(x_end_pose[0]))
     centre_x = 0.5 * (x_start + x_end)
 
-    if abs(axis_direction[0]) > 1e-8:
-        t_mid = (centre_x - axis_point[0]) / axis_direction[0]
-        axis_mid = _add(axis_point, _scale(axis_direction, t_mid))
-    else:
-        axis_mid = axis_point[:]
-
-    cy = axis_mid[1]
-    cz = axis_mid[2]
+    cy = float(fit["centre_yz"][0])
+    cz = float(fit["centre_yz"][1])
     centre = [centre_x, cy, cz]
 
-    theta_a = _theta_yz_deg(circ_points[0], cy, cz)
-    theta_b_raw = _theta_yz_deg(circ_points[1], cy, cz)
+    axis_point = [centre_x, cy, cz]
+    axis_direction = [1.0, 0.0, 0.0]
+
+    print("\nChoose theta sweep limits from taught points.")
+    print("Tip: use the two edge points of the surface arc you want to scan.")
+    theta_idx_a, theta_idx_b = _prompt_theta_limit_indices(len(circ_points))
+
+    theta_a = _theta_yz_deg(circ_points[theta_idx_a], cy, cz)
+    theta_b_raw = _theta_yz_deg(circ_points[theta_idx_b], cy, cz)
     theta_b = _closest_equivalent_angle(theta_b_raw, theta_a)
     theta_span = abs(theta_b - theta_a)
 
-    x_axis = [1.0, 0.0, 0.0]
-    tilt_cos = max(-1.0, min(1.0, abs(_dot(axis_direction, x_axis))))
-    axis_tilt_deg = math.degrees(math.acos(tilt_cos))
+    axis_tilt_deg = 0.0
 
     print(f"\nFitted axis point:     x={axis_point[0]:.2f}  y={axis_point[1]:.2f}  z={axis_point[2]:.2f}")
     print(
@@ -564,7 +682,7 @@ def main(surface_points=None):
     print(f"Quality score:         {quality_score:.1f} / 100")
 
     print("\nComputing bootstrap confidence intervals (this may take a few seconds)...")
-    bootstrap = _bootstrap_cylinder_confidence(fit_points, bootstrap_samples=200)
+    bootstrap = _bootstrap_horizontal_confidence(fit_points, bootstrap_samples=200)
     if bootstrap:
         radius_ci = bootstrap["radius_ci95_mm"]
         tilt_ci = bootstrap["axis_tilt_ci95_deg"]
@@ -602,7 +720,7 @@ def main(surface_points=None):
 
     all_points = circ_points + [x_start_pose, x_end_pose]
     extras = {
-        "fit_version": "horizontal_cylinder_3d_v1",
+        "fit_version": "horizontal_cylinder_constrained_v2",
         "acceptance_gate": {
             "passed": gate_passed,
             "failures": failures,
@@ -619,6 +737,7 @@ def main(surface_points=None):
             "quality_score": float(quality_score),
             "robust_sigma_mm": float(fit["sigma"]),
         },
+        "theta_limit_point_indices_1based": [int(theta_idx_a + 1), int(theta_idx_b + 1)],
     }
     if bootstrap:
         extras["confidence"] = {

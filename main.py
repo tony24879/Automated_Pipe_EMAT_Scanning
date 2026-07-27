@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 from tkinter import messagebox
 
+from config.robot_config import ROBOT_IP
+from robot.setup import RobotSetup
+from xarm.wrapper import XArmAPI
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -53,7 +57,7 @@ def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[f
 		radius=radius,
 		length=length,
 		lift_off=0.0,
-		outer_offset_mm=0.0,
+		outer_offset_mm=10.0,
 		x_start=x_start,
 		x_end=x_end,
 		theta_limit_a_deg=theta_limit_a_deg,
@@ -123,6 +127,26 @@ def _launch_module(module_name: str, args: list[str]) -> None:
 		env=env,
 		creationflags=creationflags,
 	)
+
+
+def _switch_robot_manual_mode(enabled: bool) -> None:
+	"""Connect briefly and switch the arm between normal and teaching mode."""
+	arm = XArmAPI(ROBOT_IP)
+	try:
+		arm.motion_enable(True)
+		arm.set_mode(0)
+		arm.set_state(0)
+
+		if enabled:
+			RobotSetup(arm).configure()
+			arm.motion_enable(True)
+			arm.set_mode(2)
+			arm.set_state(0)
+		else:
+			arm.set_mode(0)
+			arm.set_state(0)
+	finally:
+		arm.disconnect()
 
 
 def _show_calibrate_dialog(parent: tk.Tk) -> None:
@@ -273,6 +297,23 @@ def main() -> None:
 	tk.Button(frame, text="Calibrate", width=22, command=lambda: _show_calibrate_dialog(root)).pack(pady=(0, 8))
 	tk.Button(frame, text="Run Scan", width=22, command=lambda: _show_scan_dialog(root)).pack(pady=(0, 8))
 	tk.Button(frame, text="Exit", width=22, command=root.destroy).pack()
+
+	manual_mode_var = tk.BooleanVar(value=False)
+
+	def on_manual_mode_toggle() -> None:
+		enabled = manual_mode_var.get()
+		try:
+			_switch_robot_manual_mode(enabled)
+		except Exception as exc:
+			manual_mode_var.set(not enabled)
+			messagebox.showerror("Robot Error", f"Unable to switch manual mode:\n{exc}", parent=root)
+
+	tk.Checkbutton(
+		frame,
+		text="Manual mode for robot arm",
+		variable=manual_mode_var,
+		command=on_manual_mode_toggle,
+	).pack(anchor="w", pady=(12, 0))
 
 	root.mainloop()
 
