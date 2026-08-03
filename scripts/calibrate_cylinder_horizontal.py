@@ -584,7 +584,6 @@ def main(surface_points=None):
 
         print("\n--- PHASE 1: 3D cylinder surface teaching ---")
         print("Touch multiple surface points spread across both circumference and x range.")
-        print("Important: point 1 and point 2 will become your scan theta limits.")
         print("For top-surface-only scans, keep these two limits within about 180 degrees span.")
 
         default_count = 18

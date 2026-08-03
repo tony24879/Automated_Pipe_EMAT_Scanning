@@ -265,6 +265,7 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 					"mesh",
 					"--robot-mesh-dir",
 					"3Dview/meshes/lite6",
+					"--allow-failed-calibration",
 					"--scan-points-per-x",
 					str(theta_steps),
 					"--x-scans",

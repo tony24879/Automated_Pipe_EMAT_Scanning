@@ -250,11 +250,11 @@ def _show_heatmap(parent: tk.Tk) -> None:
     out_var = _add_output_folder_input(frame, 2, "Output folder location:", default=str(PROCESSED_DIR / "plots"))
 
     tk.Label(frame, text="Plot title prefix:").grid(row=4, column=0, sticky="w")
-    title_var = tk.StringVar(value="ToF Error Heatmap")
+    title_var = tk.StringVar(value="ToF Heatmap")
     tk.Entry(frame, textvariable=title_var, width=62).grid(row=5, column=0, sticky="we", padx=(0, 8), pady=(4, 10))
 
     tk.Label(frame, text="Color bar label:").grid(row=6, column=0, sticky="w")
-    cbar_var = tk.StringVar(value="ToF Error")
+    cbar_var = tk.StringVar(value="ToF (s)")
     tk.Entry(frame, textvariable=cbar_var, width=62).grid(row=7, column=0, sticky="we", padx=(0, 8), pady=(4, 10))
 
     interpolation_var = tk.BooleanVar(value=True)
