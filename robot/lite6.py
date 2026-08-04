@@ -18,6 +18,7 @@ class Lite6:
     def move_to(self, x, y, z, speed=50, wait=True, roll=None, pitch=None, yaw=None):
         """Move to an absolute Cartesian pose while preserving orientation when omitted."""
         if roll is None or pitch is None or yaw is None:
+            # Reuse current tool orientation when only position is specified.
             code, pose = self.arm.get_position()
             if code == 0 and pose and len(pose) >= 6 and all(math.isfinite(value) for value in pose[3:6]):
                 roll, pitch, yaw = pose[3:6]
@@ -38,8 +39,10 @@ class Lite6:
 
     def move_relative(self, dx=0, dy=0, dz=0, speed=50):
         """Move by a Cartesian delta from the current pose."""
-        code, pos = self.arm.get_position()
-        x, y, z, rx, ry, rz = pos
+        # Relative motion is implemented by reading the current pose and
+        # issuing an absolute command to the translated target.
+        _code, pos = self.arm.get_position()
+        x, y, z, _rx, _ry, _rz = pos
 
         return self.move_to(
             x + dx,
@@ -50,7 +53,7 @@ class Lite6:
 
     def get_pose(self):
         """Read and return the current Cartesian pose."""
-        code, pose = self.arm.get_position()
+        _code, pose = self.arm.get_position()
         return pose
 
     # -------------------------

@@ -1,7 +1,7 @@
 """CSV logger for synchronized robot pose and EMAT waveform data."""
 
-import os
 import csv
+import os
 import time
 
 from scipy.signal import find_peaks
@@ -17,7 +17,7 @@ class SyncLogger:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self.filename = f"{folder}/sync_scan_{timestamp}.csv"
 
-        self.file = open(self.filename, "w", newline="")
+        self.file = open(self.filename, "w", newline="")  # noqa: SIM115 - file stays open for streaming rows until close().
         self.writer = csv.writer(self.file)
         self._header_written = False
         self._signal_len = None
@@ -40,6 +40,8 @@ class SyncLogger:
             except TypeError:
                 return [value]
 
+            # Recursively flatten nested iterables so callers can pass lists,
+            # numpy arrays, or mixed nested containers from different APIs.
             flattened = []
             for item in iterator:
                 flattened.extend(_flatten(item))
@@ -78,6 +80,12 @@ class SyncLogger:
         min_peak_distance = 100
         min_prominence = 500
 
+        # These constants are tuned for current acquisition settings and are
+        # intentionally centralized here for easier field retuning.
+        # - skip_samples avoids early transducer ringing/noise floor.
+        # - min_peak_distance avoids counting the same lobe twice.
+        # - min_prominence rejects low-energy spurious peaks.
+
         if len(samples) <= skip_samples + 1:
             return ""
 
@@ -96,6 +104,7 @@ class SyncLogger:
         second_peak_index = skip_samples + int(peak_indices[1])
 
         sample_difference = second_peak_index - first_peak_index
+        # Current hardware sampling period is 20 ns (50 MHz acquisition).
         return sample_difference * (20e-9)
 
     def log(self, pose, signal, theta="", axis_position=""):

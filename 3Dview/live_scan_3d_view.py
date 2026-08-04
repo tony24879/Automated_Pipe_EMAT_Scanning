@@ -8,6 +8,7 @@ import numpy as np
 
 
 def _rot_x(angle_rad):
+    """Right-handed active rotation about the +X axis."""
     c = math.cos(angle_rad)
     s = math.sin(angle_rad)
     return np.array(
@@ -17,6 +18,7 @@ def _rot_x(angle_rad):
 
 
 def _rot_y(angle_rad):
+    """Right-handed active rotation about the +Y axis."""
     c = math.cos(angle_rad)
     s = math.sin(angle_rad)
     return np.array(
@@ -26,6 +28,7 @@ def _rot_y(angle_rad):
 
 
 def _rot_z(angle_rad):
+    """Right-handed active rotation about the +Z axis."""
     c = math.cos(angle_rad)
     s = math.sin(angle_rad)
     return np.array(
@@ -39,6 +42,8 @@ def _rpy_deg_to_rot(roll_deg, pitch_deg, yaw_deg):
     roll = math.radians(float(roll_deg))
     pitch = math.radians(float(pitch_deg))
     yaw = math.radians(float(yaw_deg))
+    # Composition order matches intrinsic XYZ-equivalent roll/pitch/yaw usage
+    # in the rest of this codebase: R = Rz(yaw) * Ry(pitch) * Rx(roll).
     return _rot_z(yaw) @ _rot_y(pitch) @ _rot_x(roll)
 
 
@@ -134,6 +139,7 @@ class LiveScan3DView:
         )
 
     def _forward_kinematics_points(self, joint_angles_deg):
+        """Approximate Lite6 joint positions for visualization only."""
         angles = list(joint_angles_deg)[:6]
         if len(angles) < 6:
             angles.extend([0.0] * (6 - len(angles)))
@@ -184,6 +190,8 @@ class LiveScan3DView:
         if len(tcp_pose) >= 6 and np.linalg.norm(self.tcp_offset_xyz) > 1e-9:
             tcp_xyz = np.array([float(tcp_pose[0]), float(tcp_pose[1]), float(tcp_pose[2])], dtype=float)
             tcp_rot = _rpy_deg_to_rot(tcp_pose[3], tcp_pose[4], tcp_pose[5])
+            # Shift the rendered stick model so its last joint aligns with the
+            # expected flange point implied by TCP + configured tool offset.
             expected_joint6_xyz = tcp_xyz - tcp_rot @ self.tcp_offset_xyz
             shift_xyz = expected_joint6_xyz - points[-1]
             points = points + shift_xyz

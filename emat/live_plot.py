@@ -2,8 +2,8 @@
 
 import time
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from scipy.signal import find_peaks
 
 
@@ -26,6 +26,8 @@ class LiveWaveformPlot:
         self.ax.set_xlabel("Sample")
         self.ax.set_ylabel("Amplitude")
 
+        # Peak-picking constants are matched to current acquisition settings
+        # and should be retuned if sampling rate or transducer setup changes.
         self._skip_samples = 150
         self._min_peak_distance = 100
         self._min_prominence = 500
@@ -87,7 +89,7 @@ class LiveWaveformPlot:
             self.fig.canvas.flush_events()
             self._last_draw_ts = now
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - plotting backend failures must not stop acquisition.
             self._disable(str(exc))
             return False
 
@@ -97,6 +99,6 @@ class LiveWaveformPlot:
         try:
             plt.ioff()
             plt.close(self.fig)
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - ignore backend-specific close failures during shutdown.
             # Ignore close-time backend errors during shutdown.
             pass

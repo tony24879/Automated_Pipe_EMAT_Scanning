@@ -1,7 +1,7 @@
 """Minimal script to verify controller connectivity."""
 
-from robot.connection import RobotConnection
 from config.robot_config import ROBOT_IP
+from robot.connection import RobotConnection
 
 # Create and open robot connection.
 conn = RobotConnection(ROBOT_IP)

@@ -7,8 +7,7 @@ import math
 import time
 from pathlib import Path
 
-from config.robot_config import ROBOT_IP
-from config.robot_config import TCP_OFFSET
+from config.robot_config import ROBOT_IP, TCP_OFFSET
 from emat.emat_interface import EMATSession
 from emat.live_plot import LiveWaveformPlot
 from emat.sync_logger import SyncLogger
@@ -408,6 +407,8 @@ def run_horizontal_cylindrical_scan(
         print(f"Calibrated x range: {x_start:.1f} mm to {x_end:.1f} mm")
         print(f"Theta limits: {theta_limit_a_deg:.1f} deg -> {theta_limit_b_deg:.1f} deg")
 
+        # Respect calibration acceptance gating so failed geometry does not
+        # silently drive hardware into unsafe or low-quality trajectories.
         if not gate_passed:
             print("Warning: calibration acceptance gate status is FAIL")
             for failure in gate_failures:
@@ -448,7 +449,7 @@ def run_horizontal_cylindrical_scan(
     plotter = None
     try:
         plotter = LiveWaveformPlot()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - live plot is optional and must not block scan execution.
         print(f"Warning: unable to initialize live waveform plot ({exc}); continuing without live plot")
     view3d = None
     if enable_3d_view:
@@ -465,7 +466,7 @@ def run_horizontal_cylindrical_scan(
                 mesh_dir=robot_mesh_dir,
                 mesh_scale=robot_mesh_scale,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 3D view is optional for scan operation.
             print(f"Warning: unable to initialize 3D scan view ({exc})")
 
     logger = SyncLogger(folder=output_folder)
@@ -515,6 +516,8 @@ def run_horizontal_cylindrical_scan(
             radial_out_y = current_y + radial_retreat_mm * (dy / radial_norm)
             radial_out_z = current_z + radial_retreat_mm * (dz / radial_norm)
 
+        # Sequence is ordered to first create radial separation from the work
+        # surface, then regain Z clearance, then traverse at safe height.
         retreat_moves = [
             (current_x, radial_out_y, radial_out_z, current_roll, current_pitch, current_yaw, "Radial outward nudge"),
             (current_x, radial_out_y, safe_z, current_roll, current_pitch, current_yaw, "Lift to clearance"),
@@ -594,7 +597,7 @@ def run_horizontal_cylindrical_scan(
                             "Safer startup transit enabled: "
                             f"lift to z={safe_z:.1f} mm, XY at clearance, then rotate before descent"
                         )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - fallback to original first move on split-planning failure.
                     print(f"Warning: unable to create split first move ({exc}); using original path")
 
             capture_count = sum(1 for *_, capture in execution_points if capture)
@@ -647,6 +650,8 @@ def run_horizontal_cylindrical_scan(
                         if first_capture_x is None:
                             first_capture_x = float(x)
 
+                        # Theta/axis_position are scan coordinates exported for
+                        # downstream ToF heatmaps and section-aligned analysis.
                         theta_deg = math.degrees(math.atan2(float(z) - float(centre[2]), float(y) - float(centre[1])))
                         axis_position_mm = float(x) - float(first_capture_x)
 
@@ -659,14 +664,14 @@ def run_horizontal_cylindrical_scan(
             except KeyboardInterrupt:
                 scan_interrupted = True
                 print("Scan interrupted by user")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - keep failure for deferred handling while preserving retreat path.
                 pending_exception = exc
 
             if scan_completed or scan_interrupted:
                 retreat_reason = "completion" if scan_completed else "interruption"
                 try:
                     _execute_reverse_startup_retreat(retreat_reason)
-                except Exception as retreat_exc:
+                except Exception as retreat_exc:  # noqa: BLE001 - retreat failure is non-fatal during shutdown handling.
                     print(f"Warning: reverse retreat failed ({retreat_exc})")
 
             if pending_exception is not None:

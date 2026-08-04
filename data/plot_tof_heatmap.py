@@ -235,6 +235,8 @@ def interpolate_griddata(
     points = np.column_stack((x, theta))
     heat = griddata(points, tof, (x_grid, theta_grid), method=method)
 
+    # Cubic/linear can be undefined near convex-hull edges; fill holes with
+    # nearest-neighbor values to keep exported images fully populated.
     if np.isnan(heat).any():
         nearest = griddata(points, tof, (x_grid, theta_grid), method="nearest")
         heat = np.where(np.isnan(heat), nearest, heat)
@@ -386,6 +388,8 @@ def main() -> None:
         theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
         datasets.append((csv_path, theta, x, tof))
 
+    # Use one shared color scale across all inputs so figure-to-figure
+    # comparisons reflect signal differences rather than autoscaling.
     global_min = float(min(np.min(tof) for _, _, _, tof in datasets))
     global_max = float(max(np.max(tof) for _, _, _, tof in datasets))
     if np.isclose(global_min, global_max):
@@ -412,6 +416,8 @@ def main() -> None:
             title = csv_path.stem
 
         if interpolation_enabled:
+            # IDW is robust for sparse data; griddata methods are smoother but
+            # may extrapolate less predictably near boundaries.
             if args.interpolation_method == "idw":
                 theta_grid, x_grid, heat = interpolate_idw(
                     theta=theta,

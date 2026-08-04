@@ -127,6 +127,8 @@ def main() -> None:
         tof_vals = load_tof_values(csv_path, args.tof_col)
         datasets.append((csv_path, tof_vals))
 
+    # Shared bin edges across all datasets make distribution comparisons
+    # meaningful when plotting multiple scans in one run.
     global_min = float(min(np.min(tof_vals) for _, tof_vals in datasets))
     global_max = float(max(np.max(tof_vals) for _, tof_vals in datasets))
     if np.isclose(global_min, global_max):
@@ -134,6 +136,7 @@ def main() -> None:
 
     bin_edges = np.linspace(global_min, global_max, args.bins + 1)
 
+    # Keep y-axis consistent across outputs so bar heights are comparable.
     global_y_max = 0.0
     for _, tof_vals in datasets:
         counts, _ = np.histogram(tof_vals, bins=bin_edges)

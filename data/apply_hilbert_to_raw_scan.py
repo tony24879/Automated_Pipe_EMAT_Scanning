@@ -17,17 +17,18 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import List
 
 import numpy as np
 from scipy import signal
 
 
-def compute_time_of_flight(signal_values: List[float]) -> str:
+def compute_time_of_flight(signal_values: list[float]) -> str:
     """Compute TOF from peak index difference in fixed sample windows."""
     if len(signal_values) <= 690:
         return ""
 
+    # Window bounds are sample indices tuned for the expected echo locations in
+    # current hardware geometry; they should track any acquisition retuning.
     first_start, first_end = 300, 380
     second_start, second_end = 610, 690
 
@@ -44,9 +45,9 @@ def compute_time_of_flight(signal_values: List[float]) -> str:
     return str(sample_difference * (20e-9))
 
 
-def parse_signal_columns(row: List[str]) -> List[float]:
+def parse_signal_columns(row: list[str]) -> list[float]:
     """Parse signal values from column 11 onward (1-based indexing)."""
-    values: List[float] = []
+    values: list[float] = []
     for cell in row[10:]:
         text = cell.strip()
         if text == "":
@@ -81,6 +82,7 @@ def process_file(input_path: Path, output_folder: Path | None = None) -> Path:
             if not row:
                 continue
 
+            # Preserve metadata columns exactly and only transform signal + TOF.
             prefix = row[:9]
             try:
                 raw_signal = parse_signal_columns(row)

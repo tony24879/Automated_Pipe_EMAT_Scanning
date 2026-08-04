@@ -17,10 +17,11 @@ import argparse
 import csv
 from pathlib import Path
 
-
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "processed"
 
+# Signal-search bounds are 1-based CSV column indices.
+# Keep these as constants so window retuning is explicit and centralized.
 FIRST_SIGNAL_COL = 300 #310
 LAST_SIGNAL_COL = 400 #390
 TOF_SCALE_SECONDS = 20e-9
@@ -45,6 +46,7 @@ def build_output_path(input_csv: Path, output_folder: Path | None = None) -> Pat
 
 
 def compute_time_of_flight(row: list[str]) -> str:
+    """Return first-peak TOF in seconds, or empty string when not computable."""
     start_idx = to_zero_based(FIRST_SIGNAL_COL)
     end_idx = to_zero_based(LAST_SIGNAL_COL)
 
@@ -69,6 +71,9 @@ def compute_time_of_flight(row: list[str]) -> str:
     if peak_value is None or peak_column is None:
         return ""
 
+    # Conversion pipeline:
+    # 1) Convert detected peak column index to sample time.
+    # 2) Apply a fixed calibration offset used by downstream tooling.
     return str(((peak_column - 10) * TOF_SCALE_SECONDS) - 0.00000085)
 
 

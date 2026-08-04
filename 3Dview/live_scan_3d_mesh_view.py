@@ -1,9 +1,9 @@
 """PyVista-based live 3D mesh view for horizontal cylindrical scans."""
 
+import logging
 import math
 import time
 from pathlib import Path
-import logging
 
 import numpy as np
 
@@ -114,6 +114,7 @@ class LiveScan3DMeshView:
         )
 
     def _rot_axis(self, axis_name, angle_rad):
+        """Return axis-specific right-handed rotation with optional sign prefix."""
         axis = str(axis_name).strip().lower()
         sign = -1.0 if axis.startswith("-") else 1.0
         axis = axis.lstrip("+-")
@@ -131,6 +132,7 @@ class LiveScan3DMeshView:
         return self._rot_z(yaw) @ self._rot_y(pitch) @ self._rot_x(roll)
 
     def _set_camera(self):
+        """Place camera to frame both robot and scan cylinder by default."""
         span_x = max(320.0, abs(self.x_end - self.x_start) + 260.0)
         span_yz = max(320.0, 2.0 * self.radius + 260.0)
         x_mid = 0.5 * (self.x_start + self.x_end)
@@ -258,6 +260,8 @@ class LiveScan3DMeshView:
         frames = {"base": base_tf}
 
         joint_points = []
+        # J1 rotates at the base origin; downstream joints then apply local
+        # offsets and per-joint rotations according to the configured order.
         joint_tf = base_tf @ self._rotation_transform(self.joint_axes[0], a[0])
         frames["link1"] = joint_tf
         joint_points.append(joint_tf[:3, 3].copy())
@@ -294,6 +298,7 @@ class LiveScan3DMeshView:
         return aligned
 
     def _apply_link_actor_transforms(self, frames):
+        """Push computed homogeneous transforms into loaded STL actors."""
         for name, actor in self._link_actors.items():
             transform = frames.get(name)
             if transform is None:
@@ -301,6 +306,7 @@ class LiveScan3DMeshView:
             actor.user_matrix = transform
 
     def _pose_from_arm(self, arm):
+        """Read TCP pose and joint angles, tolerating API payload variants."""
         pose_code, pose = arm.get_position()
         if pose_code != 0 or pose is None or len(pose) < 6:
             return None, None
@@ -312,7 +318,7 @@ class LiveScan3DMeshView:
                 candidate = state_payload[0]
                 if isinstance(candidate, (list, tuple)) and len(candidate) >= 6:
                     angles = list(candidate[:6])
-        except Exception:
+        except Exception:  # noqa: BLE001 - joint parsing tolerates heterogeneous robot API payloads.
             angles = None
 
         if angles is None:

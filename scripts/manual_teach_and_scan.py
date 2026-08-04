@@ -2,14 +2,12 @@
 
 import time
 
-from robot.connection import RobotConnection
-from robot.lite6 import Lite6
-
+from config.robot_config import ROBOT_IP
 from emat.emat_interface import EMATSession
 from emat.live_plot import LiveWaveformPlot
 from emat.sync_logger import SyncLogger
-
-from config.robot_config import ROBOT_IP
+from robot.connection import RobotConnection
+from robot.lite6 import Lite6
 
 
 def _make_trajectory_name():
@@ -71,6 +69,8 @@ def main():
 
         duration = _get_trajectory_duration(arm, trajectory_name)
         if duration is None:
+            # Use a conservative fallback so acquisition loop still runs even
+            # when firmware does not report trajectory metadata.
             print(f"Trajectory saved as {trajectory_name}.traj")
             duration = 5.0
         else:
@@ -85,6 +85,8 @@ def main():
             if play_code != 0:
                 raise RuntimeError(f"Failed to start trajectory playback: code={play_code}")
 
+            # Guard against silent playback failures where command succeeds but
+            # robot never transitions into moving state.
             start_deadline = time.monotonic() + 5
             while time.monotonic() < start_deadline and not arm.get_is_moving():
                 time.sleep(0.05)

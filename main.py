@@ -3,24 +3,25 @@
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import sys
 import tkinter as tk
-import os
+from itertools import pairwise
 from pathlib import Path
 from tkinter import messagebox
 
-from config.robot_config import ROBOT_IP
-from robot.setup import RobotSetup
 from xarm.wrapper import XArmAPI
 
+from config.robot_config import ROBOT_IP
+from robot.setup import RobotSetup
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def _format_duration(seconds: float) -> str:
 	"""Format a duration as h:mm:ss or m:ss for the scan estimate display."""
-	total_seconds = max(0, int(round(seconds)))
+	total_seconds = max(0, round(seconds))
 	hours, remainder = divmod(total_seconds, 3600)
 	minutes, secs = divmod(remainder, 60)
 	if hours:
@@ -32,7 +33,10 @@ def _format_duration(seconds: float) -> str:
 
 def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[float, float, float, int, int]:
 	"""Estimate horizontal scan duration using the generated motion path."""
-	from scans.cylindrical_scan_horizontal import HorizontalCylindricalScanPlanner, _read_horizontal_calibration_geometry
+	from scans.cylindrical_scan_horizontal import (
+		HorizontalCylindricalScanPlanner,
+		_read_horizontal_calibration_geometry,
+	)
 
 	calibration = _read_horizontal_calibration_geometry("cylinder_calibration_horizontal.json")
 	if calibration is not None:
@@ -67,10 +71,15 @@ def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[f
 	)
 
 	points = planner.generate()
-	travel_distance_mm = sum(math.dist(start[:3], end[:3]) for start, end in zip(points, points[1:]))
+	# Travel estimate combines geometric path length and a small per-point control
+	# overhead to account for command dispatch, decel/accel, and settling.
+	travel_distance_mm = sum(math.dist(start[:3], end[:3]) for start, end in pairwise(points))
 	motion_point_count = len(points)
 	speed = 40.0
 	travel_seconds = (travel_distance_mm / speed) + (0.2 * motion_point_count)
+
+	# Capture estimate models EMAT blocking by averages-per-shot plus per-block
+	# overhead; values are empirical and should be retuned with hardware changes.
 	capture_count = sum(1 for *_, capture in points if capture)
 	emat_averages = 1000
 	block_seconds = emat_averages / 1000.0
@@ -181,7 +190,7 @@ def _show_calibrate_dialog(parent: tk.Tk) -> None:
 
 		try:
 			_launch_script("scripts/calibrate_cylinder_horizontal.py", ["--surface-points", str(points)])
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 - surface any launch failure to the GUI.
 			messagebox.showerror("Launch Error", f"Unable to start calibration:\n{exc}", parent=dialog)
 			return
 		dialog.destroy()
@@ -233,7 +242,7 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 
 		try:
 			total_seconds, travel_seconds, capture_seconds, motion_points, capture_points = _estimate_horizontal_scan_time(theta_steps, axis_steps)
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 - estimation pulls config/geometry that may fail in many ways.
 			messagebox.showerror("Estimate Error", f"Unable to estimate scan time:\n{exc}", parent=dialog)
 			return
 
@@ -272,7 +281,7 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 					str(axis_steps),
 				],
 			)
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 - surface any launch failure to the GUI.
 			messagebox.showerror("Launch Error", f"Unable to start scan:\n{exc}", parent=dialog)
 			return
 		dialog.destroy()
@@ -305,7 +314,7 @@ def main() -> None:
 		enabled = manual_mode_var.get()
 		try:
 			_switch_robot_manual_mode(enabled)
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 - robot API may raise vendor-specific exception types.
 			manual_mode_var.set(not enabled)
 			messagebox.showerror("Robot Error", f"Unable to switch manual mode:\n{exc}", parent=root)
 

@@ -6,13 +6,13 @@ import math
 import time
 from pathlib import Path
 
-from robot.connection import RobotConnection
-from robot.lite6 import Lite6
-from robot.setup import RobotSetup
+from config.robot_config import ROBOT_IP
 from emat.emat_interface import EMATSession
 from emat.live_plot import LiveWaveformPlot
 from emat.sync_logger import SyncLogger
-from config.robot_config import ROBOT_IP
+from robot.connection import RobotConnection
+from robot.lite6 import Lite6
+from robot.setup import RobotSetup
 
 
 class CylindricalScanPlanner:
@@ -130,12 +130,12 @@ class CylindricalScanPlanner:
             if not first_sweep_thetas:
                 continue
 
-            def move_inner_to_inner(theta_from, theta_to, capture_to):
+            def move_inner_to_inner(theta_from, theta_to, capture_to, z_layer=z):
                 """Move between two inner-ring thetas using the outer ring as the transition corridor."""
                 nonlocal previous_yaw
-                previous_yaw = append_point(r_outer, theta_from, z, previous_yaw, capture=False)
-                previous_yaw = append_point(r_outer, theta_to, z, previous_yaw, capture=False)
-                previous_yaw = append_point(r_scan, theta_to, z, previous_yaw, capture=capture_to)
+                previous_yaw = append_point(r_outer, theta_from, z_layer, previous_yaw, capture=False)
+                previous_yaw = append_point(r_outer, theta_to, z_layer, previous_yaw, capture=False)
+                previous_yaw = append_point(r_scan, theta_to, z_layer, previous_yaw, capture=capture_to)
 
             # Start each layer from the first theta on the outer ring, then move inward to first scan point.
             first_theta = first_sweep_thetas[0]
@@ -276,6 +276,7 @@ def _read_calibration_geometry(calibration_file):
         return None
 
     # ---- New format (4-point circle fit, saved directly) ----
+    # Prefer this path because it stores solved geometry explicitly.
     if "centre" in payload and "radius" in payload and "z_start" in payload:
         centre = [float(v) for v in payload["centre"]]
         radius = float(payload["radius"])
@@ -299,6 +300,7 @@ def _read_calibration_geometry(calibration_file):
         }
 
     # ---- Legacy format (raw p0/p1/p2 touch points) ----
+    # Reconstruct geometry from raw touches for backward compatibility.
     p0 = payload.get("p0")
     p1 = payload.get("p1")
     p2 = payload.get("p2")
@@ -343,6 +345,8 @@ def run_cylindrical_scan(
         height = calibration["height"]
         z_start = calibration["z_start"]
         z_end = calibration["z_end"]
+        # Start angle is referenced to the line from cylinder centre toward the
+        # robot-base origin to keep first approach direction deterministic.
         theta_start_deg = math.degrees(math.atan2(-centre[1], -centre[0]))
 
         print(f"Using full geometry from {calibration['resolved_file']}")
@@ -382,7 +386,7 @@ def run_cylindrical_scan(
     plotter = None
     try:
         plotter = LiveWaveformPlot()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - live plot is optional and must not block scan execution.
         print(f"Warning: unable to initialize live waveform plot ({exc}); continuing without live plot")
     logger = SyncLogger(folder=output_folder)
 
@@ -418,7 +422,7 @@ def run_cylindrical_scan(
                             "Safer startup transit enabled: "
                             f"lift to z={safe_z:.1f} mm, XY at clearance, then rotate before descent"
                         )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - fallback to original first move on split-planning failure.
                     print(f"Warning: unable to create split first move ({exc}); using original path")
 
             capture_count = sum(1 for *_, capture in execution_points if capture)

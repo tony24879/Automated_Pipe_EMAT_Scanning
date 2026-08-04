@@ -16,10 +16,16 @@ import csv
 from itertools import zip_longest
 from pathlib import Path
 
-
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 TARGET_COLUMN_ONE_BASED = 10
 TARGET_COLUMN_INDEX = TARGET_COLUMN_ONE_BASED - 1
+
+
+def blank_columns_after_target(row: list[str]) -> list[str]:
+    output_row = list(row)
+    for col_index in range(TARGET_COLUMN_INDEX + 1, len(output_row)):
+        output_row[col_index] = ""
+    return output_row
 
 
 def resolve_input_path(raw_file: str) -> Path:
@@ -58,6 +64,7 @@ def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None 
 
         rows_written = 0
 
+        # zip_longest enforces strict row-count parity so scans stay aligned.
         for row_number, (first_row, second_row) in enumerate(
             zip_longest(first_reader, second_reader), start=1
         ):
@@ -79,7 +86,7 @@ def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None 
                 second_value = parse_numeric(second_row[TARGET_COLUMN_INDEX], row_number, second_csv)
             except ValueError:
                 if row_number == 1:
-                    writer.writerow(first_row)
+                    writer.writerow(blank_columns_after_target(first_row))
                     rows_written += 1
                     continue
                 raise
@@ -90,7 +97,7 @@ def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None 
                     f"of {second_csv.name}."
                 )
 
-            updated_row = list(first_row)
+            updated_row = blank_columns_after_target(first_row)
             updated_row[TARGET_COLUMN_INDEX] = str(first_value / second_value)
             writer.writerow(updated_row)
             rows_written += 1

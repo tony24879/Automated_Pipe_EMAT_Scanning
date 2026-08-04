@@ -14,7 +14,6 @@ import argparse
 import csv
 from pathlib import Path
 
-
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 TARGET_COLUMN_ONE_BASED = 10
 TARGET_COLUMN_INDEX = TARGET_COLUMN_ONE_BASED - 1
@@ -52,6 +51,7 @@ def transform_values(values: list[str], group_size: int) -> list[str]:
         )
 
     groups = [values[i : i + group_size] for i in range(0, len(values), group_size)]
+    # Reverse only group order (scan block order), not the per-group sample order.
     reversed_group_order = list(reversed(groups))
     return [value for group in reversed_group_order for value in group]
 

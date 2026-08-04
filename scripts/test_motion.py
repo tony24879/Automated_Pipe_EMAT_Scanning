@@ -1,8 +1,8 @@
 """Simple motion test that raises the end-effector by 20 mm."""
 
+from config.robot_config import ROBOT_IP
 from robot.connection import RobotConnection
 from robot.lite6 import Lite6
-from config.robot_config import ROBOT_IP
 
 # Connect and run a tiny Cartesian move as a sanity check.
 conn = RobotConnection(ROBOT_IP)

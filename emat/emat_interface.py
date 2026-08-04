@@ -1,9 +1,8 @@
 """Thin context-managed wrapper around the Vitesse EMAT API."""
 
-from VitesseAPI import Vitesse
-import numpy as np
-import numpy.typing
 from scipy import signal
+
+from VitesseAPI import Vitesse
 
 
 class EMATSession:
@@ -26,6 +25,7 @@ class EMATSession:
     def configure(self):
         """Apply scan settings tuned for current EMAT workflow."""
         self.V.setConfig(
+            # Drive/receive configuration is currently single-channel on CH1.
             opFrequency=3.6e6,
             numCycles=2,
             channelsOnDrive=[1,0,0,0,0,0,0,0],
@@ -33,7 +33,7 @@ class EMATSession:
             numAverages=1000,
             PRF=1000,
             recordLength=50e-6
-            #Edit the above parameters to fine tune data acquisition.
+            # Edit the above parameters to fine-tune SNR, depth, and throughput.
         )
 
     def acquire(self):
@@ -42,6 +42,8 @@ class EMATSession:
         numCycles = 2
         signalFrequency = 3.6e6
         nyquistFrequency = 0.5 * samplingFrequency  # nyquist frequency
+        # Design a narrow bandpass around the transmit frequency with
+        # bandwidth tied to cycle count (fewer cycles -> broader band).
         # frequency we want to ignore below
         lowcut = (1-(1/numCycles))*signalFrequency
         # frequency we want to ignore above
@@ -53,7 +55,8 @@ class EMATSession:
         b, a = signal.butter(2, [low, high], btype='band')
     
         filtAscan = signal.filtfilt(b, a, self.V.getArray())
-        # hilbert filter applied to filtered signal from amplifier
+        # Envelope is computed for callers that need amplitude-only processing.
+        # This line is intentionally kept even when the returned value differs.
         hilbAscan = abs(
             signal.hilbert(filtAscan))
         return filtAscan

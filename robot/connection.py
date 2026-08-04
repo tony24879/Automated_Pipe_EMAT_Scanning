@@ -1,7 +1,7 @@
 """Robot connection helpers for initializing and shutting down xArm sessions."""
 
+
 from xarm.wrapper import XArmAPI
-import time
 
 
 class RobotConnection:

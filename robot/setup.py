@@ -3,12 +3,12 @@
 import time
 
 from config.robot_config import (
-    TCP_OFFSET,
-    PAYLOAD_KG,
     COG,
-    COLLISION_TOOL_TYPE,
-    COLLISION_TOOL_SIZE_MM,
     COLLISION_TOOL_OFFSET_MM,
+    COLLISION_TOOL_SIZE_MM,
+    COLLISION_TOOL_TYPE,
+    PAYLOAD_KG,
+    TCP_OFFSET,
 )
 
 
@@ -69,20 +69,22 @@ class RobotSetup:
 
         print("Configuring robot...")
 
-    # Set the tool center point transform first.
+        # Set the tool center point transform first.
         self._apply_with_state_retry(
             "set_tcp_offset",
             lambda: self.arm.set_tcp_offset(tcp_offset),
         )
         print(f"TCP set: {tcp_offset}")
 
-    # Then configure mass properties so motion planning uses correct dynamics.
+        # Then configure mass properties so motion planning uses correct dynamics.
         self._apply_with_state_retry(
             "set_tcp_load",
             lambda: self.arm.set_tcp_load(payload, center_of_gravity, auto_enable=True),
         )
         print(f"Payload set: {payload} kg, CoG set: {center_of_gravity}")
 
+        # Tool type 22 expects box dimensions + offset; other types rely on
+        # firmware-defined primitive defaults.
         if int(collision_tool_type) == 22:
             x, y, z = [float(v) for v in collision_tool_size_mm]
             x_offset, y_offset, z_offset = [float(v) for v in collision_tool_offset_mm]

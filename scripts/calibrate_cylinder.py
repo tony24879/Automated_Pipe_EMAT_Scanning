@@ -4,10 +4,10 @@ import json
 import math
 from pathlib import Path
 
+from config.robot_config import ROBOT_IP
 from robot.connection import RobotConnection
 from robot.lite6 import Lite6
 from robot.setup import RobotSetup
-from config.robot_config import ROBOT_IP
 
 
 def _fit_circle_2d(points):

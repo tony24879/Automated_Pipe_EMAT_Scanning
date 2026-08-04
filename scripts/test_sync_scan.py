@@ -2,15 +2,13 @@
 
 import time
 
-from robot.connection import RobotConnection
-from robot.lite6 import Lite6
-from robot.setup import RobotSetup
-
+from config.robot_config import ROBOT_IP
 from emat.emat_interface import EMATSession
 from emat.live_plot import LiveWaveformPlot
 from emat.sync_logger import SyncLogger
-
-from config.robot_config import ROBOT_IP
+from robot.connection import RobotConnection
+from robot.lite6 import Lite6
+from robot.setup import RobotSetup
 
 # ------------------------
 # ROBOT SETUP

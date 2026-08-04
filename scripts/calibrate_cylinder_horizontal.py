@@ -1,9 +1,9 @@
 """Interactive calibration for horizontal-cylinder scans with robust 3D cylinder fitting."""
 
+import argparse
 import json
 import math
 import random
-import argparse
 from pathlib import Path
 
 from config.robot_config import ROBOT_IP
@@ -259,8 +259,8 @@ def _percentile(values, q):
         return s[0]
     q = min(1.0, max(0.0, float(q)))
     idx = q * (len(s) - 1)
-    lo = int(math.floor(idx))
-    hi = int(math.ceil(idx))
+    lo = math.floor(idx)
+    hi = math.ceil(idx)
     if lo == hi:
         return s[lo]
     t = idx - lo
@@ -333,6 +333,7 @@ def _fit_cylinder_3d(points, max_iters=20):
     fit = None
     prev_rms = None
 
+    # IRLS loop: repeatedly fit, estimate robust scale, and downweight outliers.
     for _ in range(max_iters):
         fit = _fit_cylinder_once(points, weights)
         residuals = fit["residuals"]
@@ -383,6 +384,7 @@ def _fit_horizontal_cylinder_constrained(points, max_iters=20):
     weights = [1.0 for _ in yz_points]
     prev_rms = None
 
+    # Constrained variant solves only in YZ, treating +X as known axis direction.
     for _ in range(max_iters):
         cy, cz, radius = _fit_circle_2d_weighted(yz_points, weights)
         residuals = []
@@ -442,6 +444,7 @@ def _bootstrap_horizontal_confidence(points, bootstrap_samples=200):
     radii = []
     n = len(points)
 
+    # Nonparametric bootstrap: resample taught points with replacement.
     for _ in range(bootstrap_samples):
         sample = [points[random.randint(0, n - 1)] for _ in range(n)]
         try:
@@ -619,6 +622,8 @@ def main(surface_points=None):
     finally:
         conn.disconnect()
 
+    # Fit is performed only from taught surface contacts; axis end points are
+    # used later to define scan length and compatibility centre_x.
     fit_points = [[float(p[0]), float(p[1]), float(p[2])] for p in circ_points]
     fit = _fit_horizontal_cylinder_constrained(fit_points)
     radius = float(fit["radius"])
@@ -669,6 +674,8 @@ def main(surface_points=None):
     outlier_ratio = 1.0 - (inlier_count / max(total_count, 1))
     inlier_ratio = 1.0 - outlier_ratio
 
+    # Composite quality score intended for operator feedback, not as a strict
+    # physically-derived metric.
     quality_score = 100.0
     quality_score -= min(60.0, 12.0 * rms_radial_error_mm)
     quality_score -= min(20.0, 4.0 * p95_radial_error_mm)
@@ -704,6 +711,7 @@ def main(surface_points=None):
         thresholds=thresholds,
     )
 
+    # Acceptance gate enforces minimum fit quality before saving calibration.
     gate_passed = len(failures) == 0
     if gate_passed:
         print("\nAcceptance gate: PASS")

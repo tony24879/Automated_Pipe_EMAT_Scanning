@@ -1,7 +1,13 @@
+"""Compute thickness or speed-of-sound from column-10 TOF-style values.
+
+Modes:
+- thickness: result = (col10 / 2) * speed_estimate
+- speed:     result = (thickness_estimate * 2) / col10
+"""
+
 import argparse
 import csv
 from pathlib import Path
-
 
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "processed"
@@ -44,11 +50,14 @@ def prompt_input_file() -> Path:
 
 
 def compute_result(mode: str, estimate: float, col10_value: float):
+    """Apply the selected two-way-travel conversion formula."""
     if mode == "thickness":
+        # Divide by 2 for one-way travel distance before scaling by speed.
         return (col10_value / 2) * estimate
 
     if col10_value == 0:
         return ""
+    # Rearranged from thickness = (tof/2) * speed.
     return (estimate * 2) / col10_value
 
 
@@ -139,6 +148,7 @@ def main() -> None:
             try:
                 float(first_row[9])
             except ValueError:
+                # Non-numeric column 10 on first row is treated as header.
                 has_header = True
 
         if has_header:
