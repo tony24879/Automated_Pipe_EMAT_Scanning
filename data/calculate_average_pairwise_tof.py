@@ -26,9 +26,9 @@ RAW_DIR = Path(__file__).resolve().parent / "raw"
 PROCESSED_DIR = Path(__file__).resolve().parent / "processed"
 
 # Keep these aligned with emat/sync_logger.py peak detection settings.
-SKIP_SAMPLES = 150
+SKIP_SAMPLES = 200 #150
 MIN_PEAK_DISTANCE = 100
-MIN_PROMINENCE = 500
+MIN_PROMINENCE = 30 #500
 TOF_SCALE_SECONDS = 20e-9
 
 

@@ -28,9 +28,9 @@ class LiveWaveformPlot:
 
         # Peak-picking constants are matched to current acquisition settings
         # and should be retuned if sampling rate or transducer setup changes.
-        self._skip_samples = 150
-        self._min_peak_distance = 100
-        self._min_prominence = 500
+        self._skip_samples = 200 #150
+        self._min_peak_distance = 250 #100
+        self._min_prominence = 100 #500
 
     def _find_tof_peaks(self, y):
         """Return indices for the first two positive maxima after initial noise."""

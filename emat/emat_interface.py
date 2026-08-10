@@ -26,8 +26,8 @@ class EMATSession:
         """Apply scan settings tuned for current EMAT workflow."""
         self.V.setConfig(
             # Drive/receive configuration is currently single-channel on CH1.
-            opFrequency=3.6e6,
-            numCycles=2,
+            opFrequency=3.6e6, #3.6e6
+            numCycles=2, #2
             channelsOnDrive=[1,0,0,0,0,0,0,0],
             channelsOnReceive=[1,0,0,0,0,0,0,0],
             numAverages=1000,
