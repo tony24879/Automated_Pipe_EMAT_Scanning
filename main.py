@@ -31,7 +31,7 @@ def _format_duration(seconds: float) -> str:
 	return f"{secs}s"
 
 
-def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[float, float, float, int, int]:
+def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int, emat_captures: int = 1, num_repeats: int = 1) -> tuple[float, float, float, int, int]:
 	"""Estimate horizontal scan duration using the generated motion path."""
 	from scans.cylindrical_scan_horizontal import (
 		HorizontalCylindricalScanPlanner,
@@ -68,6 +68,8 @@ def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[f
 		theta_limit_b_deg=theta_limit_b_deg,
 		scan_points_per_x=theta_steps,
 		x_scans=axis_steps,
+		emat_captures_per_point=emat_captures,
+		num_repeats=num_repeats,
 	)
 
 	points = planner.generate()
@@ -85,7 +87,7 @@ def _estimate_horizontal_scan_time(theta_steps: int, axis_steps: int) -> tuple[f
 	block_seconds = emat_averages / 1000.0
 	dwell = 0.5
 	a = math.ceil(dwell / block_seconds)
-	capture_seconds = capture_count * ((a * block_seconds) + (a * 0.1))
+	capture_seconds = capture_count * ((a * block_seconds) + (a * 0.1)) * emat_captures
 	total_seconds = travel_seconds + capture_seconds
 	return total_seconds, travel_seconds, capture_seconds, motion_point_count, capture_count
 
@@ -221,27 +223,39 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 	axis_var = tk.StringVar(value="5")
 	axis_entry = tk.Entry(frame, textvariable=axis_var, width=14)
 	axis_entry.grid(row=3, column=0, sticky="we", pady=(4, 10))
+
+	tk.Label(frame, text="EMAT captures per point:").grid(row=4, column=0, sticky="w")
+	emat_captures_var = tk.StringVar(value="1")
+	emat_captures_entry = tk.Entry(frame, textvariable=emat_captures_var, width=14)
+	emat_captures_entry.grid(row=5, column=0, sticky="we", pady=(4, 10))
+
+	tk.Label(frame, text="Number of scan repeats:").grid(row=6, column=0, sticky="w")
+	repeats_var = tk.StringVar(value="1")
+	repeats_entry = tk.Entry(frame, textvariable=repeats_var, width=14)
+	repeats_entry.grid(row=7, column=0, sticky="we", pady=(4, 10))
 	theta_entry.focus_set()
 
 	estimate_var = tk.StringVar(value="Estimated scan time: not calculated yet.")
-	tk.Label(frame, textvariable=estimate_var, justify="left", wraplength=260).grid(row=4, column=0, sticky="w", pady=(0, 10))
+	tk.Label(frame, textvariable=estimate_var, justify="left", wraplength=260).grid(row=8, column=0, sticky="w", pady=(0, 10))
 
 	buttons = tk.Frame(frame)
-	buttons.grid(row=5, column=0, sticky="e")
+	buttons.grid(row=9, column=0, sticky="e")
 
 	def on_estimate_scan_time() -> None:
 		try:
 			theta_steps = int(theta_var.get().strip())
 			axis_steps = int(axis_var.get().strip())
+			emat_captures = int(emat_captures_var.get().strip())
+			repeats = int(repeats_var.get().strip())
 		except ValueError:
-			messagebox.showerror("Invalid Input", "Theta and axis steps must be integers.", parent=dialog)
+			messagebox.showerror("Invalid Input", "All parameters must be integers.", parent=dialog)
 			return
-		if theta_steps <= 0 or axis_steps <= 0:
-			messagebox.showerror("Invalid Input", "Theta and axis steps must be greater than 0.", parent=dialog)
+		if theta_steps <= 0 or axis_steps <= 0 or emat_captures <= 0 or repeats <= 0:
+			messagebox.showerror("Invalid Input", "All parameters must be greater than 0.", parent=dialog)
 			return
 
 		try:
-			total_seconds, travel_seconds, capture_seconds, motion_points, capture_points = _estimate_horizontal_scan_time(theta_steps, axis_steps)
+			total_seconds, travel_seconds, capture_seconds, motion_points, capture_points = _estimate_horizontal_scan_time(theta_steps, axis_steps, emat_captures, repeats)
 		except Exception as exc:  # noqa: BLE001 - estimation pulls config/geometry that may fail in many ways.
 			messagebox.showerror("Estimate Error", f"Unable to estimate scan time:\n{exc}", parent=dialog)
 			return
@@ -257,11 +271,13 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 		try:
 			theta_steps = int(theta_var.get().strip())
 			axis_steps = int(axis_var.get().strip())
+			emat_captures = int(emat_captures_var.get().strip())
+			repeats = int(repeats_var.get().strip())
 		except ValueError:
-			messagebox.showerror("Invalid Input", "Theta and axis steps must be integers.", parent=dialog)
+			messagebox.showerror("Invalid Input", "All parameters must be integers.", parent=dialog)
 			return
-		if theta_steps <= 0 or axis_steps <= 0:
-			messagebox.showerror("Invalid Input", "Theta and axis steps must be greater than 0.", parent=dialog)
+		if theta_steps <= 0 or axis_steps <= 0 or emat_captures <= 0 or repeats <= 0:
+			messagebox.showerror("Invalid Input", "All parameters must be greater than 0.", parent=dialog)
 			return
 
 		try:
@@ -279,6 +295,10 @@ def _show_scan_dialog(parent: tk.Tk) -> None:
 					str(theta_steps),
 					"--x-scans",
 					str(axis_steps),
+					"--emat-captures",
+					str(emat_captures),
+					"--num-repeats",
+					str(repeats),
 				],
 			)
 		except Exception as exc:  # noqa: BLE001 - surface any launch failure to the GUI.

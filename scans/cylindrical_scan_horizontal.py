@@ -32,6 +32,8 @@ class HorizontalCylindricalScanPlanner:
         theta_limit_b_deg=180.0,
         scan_points_per_x=12,
         x_scans=5,
+        emat_captures_per_point=1,
+        num_repeats=1,
     ):
         self.centre = [float(c) for c in centre]
         self.radius = float(radius)
@@ -49,6 +51,8 @@ class HorizontalCylindricalScanPlanner:
 
         self.scan_points_per_x = max(2, int(scan_points_per_x))
         self.x_scans = max(1, int(x_scans))
+        self.emat_captures_per_point = max(1, int(emat_captures_per_point))
+        self.num_repeats = max(1, int(num_repeats))
 
     def _x_positions(self):
         """Compute axis-step positions along cylinder length."""
@@ -97,66 +101,137 @@ class HorizontalCylindricalScanPlanner:
         return roll
 
     def generate(self):
-        """Build serpentine theta sweeps with outer-ring transitions between all inner points."""
-        points = []
+        """Build serpentine theta sweeps with repeats and inter-scan transitions."""
+        all_points = []
         r_scan = self.radius + self.lift_off
         r_outer = r_scan + self.outer_offset_mm
 
         x_positions = self._x_positions()
         if not x_positions:
-            return points
+            return all_points
 
         theta_a = self.theta_limit_a_deg
         theta_b = self._unwrap_near(self.theta_limit_b_deg, theta_a)
 
-        previous_roll = None
+        # Generate a single scan
+        def generate_single_scan():
+            """Generate one complete scan."""
+            points = []
+            previous_roll = None
 
-        # Radial standoff approach before first contact.
-        approach_r = r_outer + 50.0
-        first_x = x_positions[0]
-        first_theta = theta_a
-        previous_roll = self._append_point(points, approach_r, first_theta, first_x, previous_roll, capture=False)
+            # Radial standoff approach before first contact.
+            approach_r = r_outer + 50.0
+            first_x = x_positions[0]
+            first_theta = theta_a
+            previous_roll = self._append_point(points, approach_r, first_theta, first_x, previous_roll, capture=False)
 
-        def move_inner_to_inner(theta_from, theta_to, x_mm, prev_roll, capture_to):
-            """Move between adjacent inner points using the outer ring as a corridor."""
-            prev_roll = self._append_point(points, r_outer, theta_from, x_mm, prev_roll, capture=False)
-            prev_roll = self._append_point(points, r_outer, theta_to, x_mm, prev_roll, capture=False)
-            prev_roll = self._append_point(points, r_scan, theta_to, x_mm, prev_roll, capture=capture_to)
-            return prev_roll
+            def move_inner_to_inner(theta_from, theta_to, x_mm, prev_roll, capture_to):
+                """Move between adjacent inner points using the outer ring as a corridor."""
+                prev_roll = self._append_point(points, r_outer, theta_from, x_mm, prev_roll, capture=False)
+                prev_roll = self._append_point(points, r_outer, theta_to, x_mm, prev_roll, capture=False)
+                prev_roll = self._append_point(points, r_scan, theta_to, x_mm, prev_roll, capture=capture_to)
+                return prev_roll
 
-        # Enter first layer at theta_a.
-        previous_roll = self._append_point(points, r_outer, theta_a, first_x, previous_roll, capture=False)
-        previous_roll = self._append_point(points, r_scan, theta_a, first_x, previous_roll, capture=True)
+            # Enter first layer at theta_a.
+            previous_roll = self._append_point(points, r_outer, theta_a, first_x, previous_roll, capture=False)
+            previous_roll = self._append_point(points, r_scan, theta_a, first_x, previous_roll, capture=self.emat_captures_per_point)
 
-        prev_x = first_x
-        for layer_index, x_mm in enumerate(x_positions):
-            if layer_index % 2 == 0:
-                sweep_start = theta_a
-                sweep_end = theta_b
+            prev_x = first_x
+            for layer_index, x_mm in enumerate(x_positions):
+                if layer_index % 2 == 0:
+                    sweep_start = theta_a
+                    sweep_end = theta_b
+                else:
+                    sweep_start = theta_b
+                    sweep_end = theta_a
+
+                sweep_thetas = self._angles_for_sweep(sweep_start, sweep_end, self.scan_points_per_x)
+
+                if layer_index > 0:
+                    # Transition along axis from previous sweep endpoint while staying on the same theta.
+                    previous_roll = self._append_point(points, r_outer, sweep_start, prev_x, previous_roll, capture=False)
+                    previous_roll = self._append_point(points, r_outer, sweep_start, x_mm, previous_roll, capture=False)
+                    previous_roll = self._append_point(points, r_scan, sweep_start, x_mm, previous_roll, capture=self.emat_captures_per_point)
+
+                for i in range(len(sweep_thetas) - 1):
+                    previous_roll = move_inner_to_inner(
+                        sweep_thetas[i],
+                        sweep_thetas[i + 1],
+                        x_mm,
+                        previous_roll,
+                        capture_to=self.emat_captures_per_point,
+                    )
+
+                prev_x = x_mm
+
+            return points
+
+        # Generate the first scan
+        all_points = generate_single_scan()
+        last_roll_state = all_points[-1][3] if all_points else None  # Extract roll from last point
+        
+        # For repeats, add transition moves and subsequent scans
+        for repeat_index in range(1, self.num_repeats):
+            if not all_points:
+                break
+            
+            # Get the last point of current scan (the actual contact point)
+            last_scan_point = all_points[-1]
+            last_x, last_y, last_z, last_roll, last_pitch, last_yaw = last_scan_point[:6]
+            
+            # Get the first contact point of the next scan (should be at first x position, theta_a)
+            first_x = x_positions[0]
+            first_theta = theta_a
+            first_theta_rad = math.radians(first_theta)
+            first_y = self.centre[1] + r_scan * math.cos(first_theta_rad)
+            first_z = self.centre[2] + r_scan * math.sin(first_theta_rad)
+
+            # Outer-ring position above the first scan point — descend here, then move radially in.
+            first_outer_y = self.centre[1] + r_outer * math.cos(first_theta_rad)
+            first_outer_z = self.centre[2] + r_outer * math.sin(first_theta_rad)
+
+            # 1. Move radially outward from the final point of current scan
+            radial_retreat_mm = 25.0
+            dy = last_y - self.centre[1]
+            dz = last_z - self.centre[2]
+            radial_norm = math.hypot(dy, dz)
+            if radial_norm < 1e-9:
+                radial_out_y = last_y + radial_retreat_mm
+                radial_out_z = last_z
             else:
-                sweep_start = theta_b
-                sweep_end = theta_a
+                radial_out_y = last_y + radial_retreat_mm * (dy / radial_norm)
+                radial_out_z = last_z + radial_retreat_mm * (dz / radial_norm)
 
-            sweep_thetas = self._angles_for_sweep(sweep_start, sweep_end, self.scan_points_per_x)
+            # 2. Lift to safe Z (clearance above the work)
+            safe_z = max(last_z, first_outer_z) + 80.0
 
-            if layer_index > 0:
-                # Transition along axis from previous sweep endpoint while staying on the same theta.
-                previous_roll = self._append_point(points, r_outer, sweep_start, prev_x, previous_roll, capture=False)
-                previous_roll = self._append_point(points, r_outer, sweep_start, x_mm, previous_roll, capture=False)
-                previous_roll = self._append_point(points, r_scan, sweep_start, x_mm, previous_roll, capture=True)
+            # 3. Get the roll orientation for first point of next scan
+            first_roll = self._roll_from_theta(first_theta, last_roll)
 
-            for i in range(len(sweep_thetas) - 1):
-                previous_roll = move_inner_to_inner(
-                    sweep_thetas[i],
-                    sweep_thetas[i + 1],
-                    x_mm,
-                    previous_roll,
-                    capture_to=True,
-                )
+            # Build the transition sequence — transit XY to above the outer ring (not the
+            # scan surface) so the Z descent stays clear of the cylinder, then move radially in.
+            transition_moves = [
+                (last_x, radial_out_y, radial_out_z, last_roll, last_pitch, last_yaw, False),  # Radial outward
+                (last_x, radial_out_y, safe_z, last_roll, last_pitch, last_yaw, False),  # Lift to clearance
+                (last_x, radial_out_y, safe_z, first_roll, 0.0, 0.0, False),  # Realign tool orientation
+                (first_x, first_outer_y, safe_z, first_roll, 0.0, 0.0, False),  # Transit XY to above outer ring
+                (first_x, first_outer_y, first_outer_z, first_roll, 0.0, 0.0, False),  # Descend to outer ring height
+            ]
 
-            prev_x = x_mm
+            # Add transition moves to all points
+            all_points.extend(transition_moves)
 
-        return points
+            # Generate next scan. Skip [0]=standoff and [1]=outer_ring since the transition
+            # already leaves the arm at the outer ring; start at [2] (first scan capture).
+            next_scan = generate_single_scan()
+            if next_scan:
+                all_points.extend(next_scan[2:])
+            
+            # Update last_roll_state for next iteration
+            if all_points:
+                last_roll_state = all_points[-1][3]
+
+        return all_points
 
     def save(self, filename):
         """Save planner settings to JSON."""
@@ -172,6 +247,8 @@ class HorizontalCylindricalScanPlanner:
             "theta_limit_b_deg": self.theta_limit_b_deg,
             "scan_points_per_x": self.scan_points_per_x,
             "x_scans": self.x_scans,
+            "emat_captures_per_point": self.emat_captures_per_point,
+            "num_repeats": self.num_repeats,
         }
         Path(filename).write_text(json.dumps(payload, indent=2))
 
@@ -378,6 +455,8 @@ def run_horizontal_cylindrical_scan(
     calibration_file=None,
     scan_points_per_x=12,
     x_scans=5,
+    emat_captures_per_point=1,
+    num_repeats=1,
     theta_limit_a_deg=0.0,
     theta_limit_b_deg=180.0,
     enable_3d_view=True,
@@ -435,6 +514,8 @@ def run_horizontal_cylindrical_scan(
         theta_limit_b_deg=theta_limit_b_deg,
         scan_points_per_x=scan_points_per_x,
         x_scans=x_scans,
+        emat_captures_per_point=emat_captures_per_point,
+        num_repeats=num_repeats,
     )
 
     points = planner.generate()
@@ -607,14 +688,17 @@ def run_horizontal_cylindrical_scan(
             print(f"Starting horizontal cylindrical scan with {len(execution_points)} motion points")
             print(f"Capture points: {capture_count}, reset/approach points: {reset_count}")
             print(f"X range: {x_start:.1f} mm to {x_end:.1f} mm")
-            print(f"Using {scan_points_per_x} scan points per x layer and {x_scans} x layers")
+            print(f"Using {scan_points_per_x} scan points per x layer, {x_scans} x layers, {emat_captures_per_point} capture(s) per point, and {num_repeats} repeat(s)")
 
             if view3d is not None:
                 view3d.update_from_arm(arm)
 
             try:
                 for index, (x, y, z, roll, pitch, yaw, capture) in enumerate(execution_points, start=1):
-                    action = "SCAN" if capture else "RESET"
+                    # capture can be False (0), True (1), or an integer > 1
+                    is_capture = bool(capture)
+                    num_captures = int(capture) if capture else 0
+                    action = "SCAN" if is_capture else "RESET"
                     print(
                         f"[{index}/{len(execution_points)}] {action} move to "
                         f"x={x:.1f}, y={y:.1f}, z={z:.1f}, roll={roll:.1f}, pitch={pitch:.1f}, yaw={yaw:.1f}"
@@ -634,30 +718,32 @@ def run_horizontal_cylindrical_scan(
                     last_reached_pose = (float(x), float(y), float(z), float(roll), float(pitch), float(yaw))
 
                     if view3d is not None:
-                        view3d.update_from_arm(arm, current_target=(x, y, z), capture=capture)
+                        view3d.update_from_arm(arm, current_target=(x, y, z), capture=is_capture)
 
-                    if capture:
-                        dwell_until = time.monotonic() + dwell_seconds
-                        data = None
-                        while time.monotonic() < dwell_until:
-                            data = emat.acquire()
-                            if plotter is not None:
-                                plotter.update(data)
-                            if view3d is not None:
-                                view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
-                            time.sleep(0.1)
+                    if is_capture:
+                        # Perform multiple captures at this point if needed
+                        for capture_num in range(num_captures):
+                            dwell_until = time.monotonic() + dwell_seconds
+                            data = None
+                            while time.monotonic() < dwell_until:
+                                data = emat.acquire()
+                                if plotter is not None:
+                                    plotter.update(data)
+                                if view3d is not None:
+                                    view3d.update_from_arm(arm, current_target=(x, y, z), capture=True)
+                                time.sleep(0.1)
 
-                        if first_capture_x is None:
-                            first_capture_x = float(x)
+                            if first_capture_x is None:
+                                first_capture_x = float(x)
 
-                        # Theta/axis_position are scan coordinates exported for
-                        # downstream ToF heatmaps and section-aligned analysis.
-                        theta_deg = math.degrees(math.atan2(float(z) - float(centre[2]), float(y) - float(centre[1])))
-                        axis_position_mm = float(x) - float(first_capture_x)
+                            # Theta/axis_position are scan coordinates exported for
+                            # downstream ToF heatmaps and section-aligned analysis.
+                            theta_deg = math.degrees(math.atan2(float(z) - float(centre[2]), float(y) - float(centre[1])))
+                            axis_position_mm = float(x) - float(first_capture_x)
 
-                        pose = robot.get_pose()
-                        logger.log(pose, data, theta=theta_deg, axis_position=axis_position_mm)
-                        print(f"Captured point {index}/{len(execution_points)}")
+                            pose = robot.get_pose()
+                            logger.log(pose, data, theta=theta_deg, axis_position=axis_position_mm)
+                            print(f"Captured point {index}/{len(execution_points)} (capture {capture_num + 1}/{num_captures})")
 
                 scan_completed = True
                 print("Horizontal cylindrical scan complete")
@@ -700,6 +786,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-folder", type=str, default="data/raw", help="Folder for scan logs")
     parser.add_argument("--scan-points-per-x", type=int, default=None, help="Number of scan points per x layer")
     parser.add_argument("--x-scans", type=int, default=None, help="Number of x layers to scan")
+    parser.add_argument("--emat-captures", type=int, default=1, help="Number of EMAT captures per scan point")
+    parser.add_argument("--num-repeats", type=int, default=1, help="Number of times to repeat the entire scan")
     parser.add_argument("--disable-3d-view", action="store_true", help="Disable live 3D visualization window")
     parser.add_argument(
         "--view-3d-backend",
@@ -735,6 +823,14 @@ if __name__ == "__main__":
     if x_scans is None:
         x_scans = int(input("Number of x layers to scan: ") or 5)
 
+    emat_captures = args.emat_captures
+    if emat_captures is None or emat_captures < 1:
+        emat_captures = int(input("Number of EMAT captures per point: ") or 1)
+
+    num_repeats = args.num_repeats
+    if num_repeats is None or num_repeats < 1:
+        num_repeats = int(input("Number of scan repeats: ") or 1)
+
     run_horizontal_cylindrical_scan(
         centre=args.centre,
         radius=args.radius,
@@ -747,6 +843,8 @@ if __name__ == "__main__":
         calibration_file=args.calibration_file,
         scan_points_per_x=scan_points_per_x,
         x_scans=x_scans,
+        emat_captures_per_point=emat_captures,
+        num_repeats=num_repeats,
         theta_limit_a_deg=args.theta_limit_a_deg,
         theta_limit_b_deg=args.theta_limit_b_deg,
         enable_3d_view=not args.disable_3d_view,

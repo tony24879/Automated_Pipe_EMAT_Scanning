@@ -1,11 +1,11 @@
-"""Extract one row's waveform from CSV, find two TOF peaks, and plot the result.
+"""Extract one or more row waveforms from CSV, find two TOF peaks, and plot results.
 
 Behavior:
 - Reads one CSV file.
-- Selects a user-specified row (1-based, data rows by default).
+- Selects one or more user-specified rows (1-based, data rows by default).
 - Extracts values from column 11 onward (1-based).
 - Applies the same peak-finding settings used in sync_logger.py/live_plot.py.
-- Prints the two peak indices and plots waveform + peak markers.
+- Prints the two peak indices and plots waveform + peak markers for each row.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def resolve_input_csv_path(input_path: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Find and plot first two TOF peaks from one CSV row waveform."
+        description="Find and plot first two TOF peaks from one or more CSV row waveforms."
     )
     parser.add_argument(
         "csv_file",
@@ -63,8 +63,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--row",
         type=int,
-        required=True,
+        required=False,
         help="1-based row number among data rows (ignores header when present).",
+    )
+    parser.add_argument(
+        "--rows",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Space-separated list of 1-based row numbers among data rows.",
     )
     parser.add_argument(
         "--start-col",
@@ -225,6 +232,37 @@ def find_two_acf_peaks(acf: np.ndarray) -> list[int]:
     return [first_peak, second_peak]
 
 
+def normalize_rows(row: int | None, rows: list[int] | None) -> list[int]:
+    selected_rows: list[int] = []
+    if row is not None:
+        selected_rows.append(row)
+    if rows:
+        selected_rows.extend(rows)
+
+    if not selected_rows:
+        raise ValueError("Provide at least one row using --row or --rows.")
+
+    unique_rows: list[int] = []
+    seen: set[int] = set()
+    for r in selected_rows:
+        if r < 1:
+            raise ValueError("Row numbers must be >= 1.")
+        if r not in seen:
+            seen.add(r)
+            unique_rows.append(r)
+    return unique_rows
+
+
+def build_save_path(base_save_path: Path, row: int, row_count: int) -> Path:
+    if row_count == 1:
+        return base_save_path
+
+    stem = base_save_path.stem
+    suffix = base_save_path.suffix or ".png"
+    parent = base_save_path.parent
+    return parent / f"{stem}_row{row}{suffix}"
+
+
 def plot_signal_with_peaks(
     y: np.ndarray,
     signal_peak_indices: list[int],
@@ -293,46 +331,55 @@ def main() -> None:
     if not csv_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {csv_path}")
 
-    signal = load_signal_row(
-        csv_path=csv_path,
-        row_1_based=args.row,
-        start_col_1_based=args.start_col,
-        header_mode=args.header,
-    )
+    rows = normalize_rows(args.row, args.rows)
 
-    signal_peak_indices = find_two_signal_peaks(signal)
-    acf = compute_autocorrelation(signal)
-    acf_peak_indices = find_two_acf_peaks(acf)
-
-    if len(signal_peak_indices) < 2:
-        print(
-            "Fewer than two peaks found in raw signal with settings: "
-            f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
+    for row in rows:
+        signal = load_signal_row(
+            csv_path=csv_path,
+            row_1_based=row,
+            start_col_1_based=args.start_col,
+            header_mode=args.header,
         )
-    else:
-        print(f"Raw signal peak 1 index: {signal_peak_indices[0]}")
-        print(f"Raw signal peak 2 index: {signal_peak_indices[1]}")
 
-    if len(acf_peak_indices) < 2:
-        print(
-            "Fewer than two peaks found in autocorrelation with settings: "
-            f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
+        signal_peak_indices = find_two_signal_peaks(signal)
+        acf = compute_autocorrelation(signal)
+        acf_peak_indices = find_two_acf_peaks(acf)
+
+        print(f"\n=== Row {row} ===")
+        if len(signal_peak_indices) < 2:
+            print(
+                "Fewer than two peaks found in raw signal with settings: "
+                f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
+            )
+        else:
+            print(f"Raw signal peak 1 index: {signal_peak_indices[0]}")
+            print(f"Raw signal peak 2 index: {signal_peak_indices[1]}")
+
+        if len(acf_peak_indices) < 2:
+            print(
+                "Fewer than two peaks found in autocorrelation with settings: "
+                f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
+            )
+        else:
+            print(f"Autocorrelation peak 1 lag index: {acf_peak_indices[0]}")
+            print(f"Autocorrelation peak 2 lag index: {acf_peak_indices[1]}")
+
+        print(f"Signal length: {len(signal)}")
+        title = f"Row {row} waveform from {csv_path.name}"
+        save_path = (
+            build_save_path(args.save, row=row, row_count=len(rows))
+            if args.save is not None
+            else None
         )
-    else:
-        print(f"Autocorrelation peak 1 lag index: {acf_peak_indices[0]}")
-        print(f"Autocorrelation peak 2 lag index: {acf_peak_indices[1]}")
-
-    print(len(signal))
-    title = f"Row {args.row} waveform from {csv_path.name}"
-    plot_signal_with_peaks(
-        signal,
-        signal_peak_indices,
-        acf,
-        acf_peak_indices,
-        title=title,
-        save_path=args.save,
-        show=not args.no_show,
-    )
+        plot_signal_with_peaks(
+            signal,
+            signal_peak_indices,
+            acf,
+            acf_peak_indices,
+            title=title,
+            save_path=save_path,
+            show=not args.no_show,
+        )
 
 
 if __name__ == "__main__":
