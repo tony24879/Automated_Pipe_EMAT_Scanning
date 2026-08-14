@@ -184,23 +184,88 @@ def load_signal_row(
     return np.asarray(signal_values, dtype=float)
 
 
-def find_two_signal_peaks(y: np.ndarray) -> list[int]:
+def find_two_signal_peaks(y: np.ndarray) -> list[tuple[int, str, float]]:
+    """Return the first two raw-signal peaks while keeping each peak on the same polarity branch.
+
+    We search both the signal and its flipped version, compare the first peak in each branch,
+    and then only consider the same branch for the second peak. This prevents mixing a
+    positive peak with a negative peak when picking the pair.
+    """
     if y.size <= SKIP_SAMPLES + 1:
         return []
 
     post_noise = y[SKIP_SAMPLES:]
-    peak_indices, _ = find_peaks(
+    pos_peak_indices, _ = find_peaks(
         post_noise,
         distance=MIN_PEAK_DISTANCE,
         prominence=MIN_PROMINENCE,
     )
+    neg_peak_indices, _ = find_peaks(
+        -post_noise,
+        distance=MIN_PEAK_DISTANCE,
+        prominence=MIN_PROMINENCE,
+    )
 
-    if len(peak_indices) < 2:
+    positive_peaks = [
+        (SKIP_SAMPLES + int(idx), "normal", float(y[SKIP_SAMPLES + int(idx)]))
+        for idx in pos_peak_indices
+    ]
+    negative_peaks = [
+        (SKIP_SAMPLES + int(idx), "flipped", float(y[SKIP_SAMPLES + int(idx)]))
+        for idx in neg_peak_indices
+    ]
+
+    if not positive_peaks and not negative_peaks:
         return []
 
-    first_peak = SKIP_SAMPLES + int(peak_indices[0])
-    second_peak = SKIP_SAMPLES + int(peak_indices[1])
-    return [first_peak, second_peak]
+    first_candidates = []
+    if positive_peaks:
+        first_candidates.append(positive_peaks[0])
+    if negative_peaks:
+        first_candidates.append(negative_peaks[0])
+
+    first_peak_index, first_source, first_peak_value = max(
+        first_candidates,
+        key=lambda item: abs(item[2]),
+    )
+
+    selected: list[tuple[int, str, float]] = [(first_peak_index, first_source, first_peak_value)]
+    same_polarity_peaks = positive_peaks if first_source == "normal" else negative_peaks
+    if len(same_polarity_peaks) > 1:
+        second_peak = max(
+            same_polarity_peaks[1:],
+            key=lambda item: abs(item[2]),
+        )
+        selected.append((second_peak[0], second_peak[1], second_peak[2]))
+
+    return selected[:2]
+
+
+def interpolate_peak_zero_crossing(y: np.ndarray, peak_idx: int) -> tuple[float, float]:
+    """Estimate a sub-sample peak location by fitting a parabola to the three samples
+    around the peak and finding the vertex. This is the usual quadratic/zero-crossing
+    interpolation used when the true peak lies between integer samples.
+    """
+    if peak_idx <= 0 or peak_idx >= y.size - 1:
+        return float(peak_idx), float(y[peak_idx])
+
+    y_minus = float(y[peak_idx - 1])
+    y0 = float(y[peak_idx])
+    y_plus = float(y[peak_idx + 1])
+    denominator = y_minus - 2.0 * y0 + y_plus
+
+    if abs(denominator) < 1e-12:
+        return float(peak_idx), y0
+
+    delta = 0.5 * (y_minus - y_plus) / denominator
+    interpolated_x = float(peak_idx) + delta
+
+    interpolated_y = (
+        y0
+        + 0.5 * (y_plus - y_minus) * delta
+        + 0.5 * (y_minus - 2.0 * y0 + y_plus) * delta**2
+    )
+    return interpolated_x, float(interpolated_y)
 
 
 def compute_autocorrelation(y: np.ndarray) -> np.ndarray:
@@ -216,7 +281,6 @@ def find_two_acf_peaks(acf: np.ndarray) -> list[int]:
     if acf.size <= 2:
         return []
 
-    # Skip lag-0 so the zero-shift energy peak does not dominate detection.
     acf_search = acf[1:]
     peak_indices, _ = find_peaks(
         acf_search,
@@ -265,7 +329,11 @@ def build_save_path(base_save_path: Path, row: int, row_count: int) -> Path:
 
 def plot_signal_with_peaks(
     y: np.ndarray,
-    signal_peak_indices: list[int],
+    raw_peak_indices: list[int],
+    interpolated_peak_index: float,
+    interpolated_peak_value: float,
+    interpolated_second_peak_index: float | None,
+    interpolated_second_peak_value: float | None,
     acf: np.ndarray,
     acf_peak_indices: list[int],
     title: str,
@@ -277,16 +345,53 @@ def plot_signal_with_peaks(
 
     x_signal = np.arange(y.size)
     signal_ax.plot(x_signal, y, label="Signal", color="tab:blue")
-    if signal_peak_indices:
-        signal_peaks_np = np.array(signal_peak_indices, dtype=int)
+
+    if raw_peak_indices:
+        raw_peak_array = np.array(raw_peak_indices, dtype=int)
         signal_ax.scatter(
-            signal_peaks_np,
-            y[signal_peaks_np],
+            raw_peak_array,
+            y[raw_peak_array],
             color="red",
-            s=40,
+            s=50,
             zorder=3,
-            label="Signal peaks",
+            label="Raw signal peaks",
         )
+        for idx in raw_peak_array:
+            signal_ax.axvline(idx, color="red", linestyle="--", alpha=0.5)
+
+    signal_ax.axvline(
+        interpolated_peak_index,
+        color="tab:orange",
+        linestyle=":",
+        alpha=0.8,
+        label="Interpolated peak 1",
+    )
+    signal_ax.scatter(
+        interpolated_peak_index,
+        interpolated_peak_value,
+        color="tab:orange",
+        s=50,
+        zorder=3,
+        label="Peak 1 after interpolation",
+    )
+
+    if interpolated_second_peak_index is not None and interpolated_second_peak_value is not None:
+        signal_ax.axvline(
+            interpolated_second_peak_index,
+            color="tab:purple",
+            linestyle=":",
+            alpha=0.8,
+            label="Interpolated peak 2",
+        )
+        signal_ax.scatter(
+            interpolated_second_peak_index,
+            interpolated_second_peak_value,
+            color="tab:purple",
+            s=50,
+            zorder=3,
+            label="Peak 2 after interpolation",
+        )
+
     signal_ax.set_title(f"{title} - Raw Signal")
     signal_ax.set_xlabel("Sample")
     signal_ax.set_ylabel("Amplitude")
@@ -341,19 +446,47 @@ def main() -> None:
             header_mode=args.header,
         )
 
-        signal_peak_indices = find_two_signal_peaks(signal)
+        signal_peaks = find_two_signal_peaks(signal)
+        if len(signal_peaks) < 2:
+            print(f"\n=== Row {row} ===")
+            print(
+                "Fewer than two usable raw-signal peaks found with settings: "
+                f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
+            )
+            continue
+
+        raw_peak_index, peak_source, peak_value = signal_peaks[0]
+        second_peak_index, second_source, second_peak_value = signal_peaks[1]
+        interpolated_peak_index, interpolated_peak_value = interpolate_peak_zero_crossing(
+            signal,
+            raw_peak_index,
+        )
+        interpolated_second_peak_index, interpolated_second_peak_value = interpolate_peak_zero_crossing(
+            signal,
+            second_peak_index,
+        )
         acf = compute_autocorrelation(signal)
         acf_peak_indices = find_two_acf_peaks(acf)
 
         print(f"\n=== Row {row} ===")
-        if len(signal_peak_indices) < 2:
-            print(
-                "Fewer than two peaks found in raw signal with settings: "
-                f"skip={SKIP_SAMPLES}, distance={MIN_PEAK_DISTANCE}, prominence={MIN_PROMINENCE}."
-            )
-        else:
-            print(f"Raw signal peak 1 index: {signal_peak_indices[0]}")
-            print(f"Raw signal peak 2 index: {signal_peak_indices[1]}")
+        print(
+            "Raw signal peak 1 from "
+            f"{peak_source} signal: index={raw_peak_index}, amplitude={peak_value:.6f}"
+        )
+        print(
+            "Raw signal peak 2 from "
+            f"{second_source} signal: index={second_peak_index}, amplitude={second_peak_value:.6f}"
+        )
+        print(
+            "Zero-crossing interpolation around peak 1: "
+            f"index_before={raw_peak_index}, value_before={float(signal[raw_peak_index]):.6f}; "
+            f"index_after={interpolated_peak_index:.6f}, value_after={interpolated_peak_value:.6f}"
+        )
+        print(
+            "Zero-crossing interpolation around peak 2: "
+            f"index_before={second_peak_index}, value_before={float(signal[second_peak_index]):.6f}; "
+            f"index_after={interpolated_second_peak_index:.6f}, value_after={interpolated_second_peak_value:.6f}"
+        )
 
         if len(acf_peak_indices) < 2:
             print(
@@ -365,6 +498,7 @@ def main() -> None:
             print(f"Autocorrelation peak 2 lag index: {acf_peak_indices[1]}")
 
         print(f"Signal length: {len(signal)}")
+
         title = f"Row {row} waveform from {csv_path.name}"
         save_path = (
             build_save_path(args.save, row=row, row_count=len(rows))
@@ -373,7 +507,11 @@ def main() -> None:
         )
         plot_signal_with_peaks(
             signal,
-            signal_peak_indices,
+            [raw_peak_index, second_peak_index],
+            interpolated_peak_index,
+            interpolated_peak_value,
+            interpolated_second_peak_index,
+            interpolated_second_peak_value,
             acf,
             acf_peak_indices,
             title=title,
