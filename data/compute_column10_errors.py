@@ -51,20 +51,16 @@ def parse_numeric(cell: str, row_number: int, file_path: Path) -> float:
         ) from exc
 
 
-def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None = None) -> Path:
-    output_csv = build_output_path(first_csv, second_csv, output_folder=output_folder)
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
+def compute_column10_error_values(first_csv: Path, second_csv: Path) -> list[float]:
+    """Return column-10 ratio values for each aligned row without writing an output CSV."""
+    results: list[float] = []
 
     with first_csv.open("r", newline="", encoding="utf-8") as first_file, second_csv.open(
         "r", newline="", encoding="utf-8"
-    ) as second_file, output_csv.open("w", newline="", encoding="utf-8") as output_file:
+    ) as second_file:
         first_reader = csv.reader(first_file)
         second_reader = csv.reader(second_file)
-        writer = csv.writer(output_file)
 
-        rows_written = 0
-
-        # zip_longest enforces strict row-count parity so scans stay aligned.
         for row_number, (first_row, second_row) in enumerate(
             zip_longest(first_reader, second_reader), start=1
         ):
@@ -80,14 +76,11 @@ def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None 
                     "or both files."
                 )
 
-            # Preserve possible header rows by copying non-numeric column-10 entries as-is.
             try:
                 first_value = parse_numeric(first_row[TARGET_COLUMN_INDEX], row_number, first_csv)
                 second_value = parse_numeric(second_row[TARGET_COLUMN_INDEX], row_number, second_csv)
             except ValueError:
                 if row_number == 1:
-                    writer.writerow(blank_columns_after_target(first_row))
-                    rows_written += 1
                     continue
                 raise
 
@@ -97,14 +90,15 @@ def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None 
                     f"of {second_csv.name}."
                 )
 
-            updated_row = blank_columns_after_target(first_row)
-            updated_row[TARGET_COLUMN_INDEX] = str(first_value / second_value)
-            writer.writerow(updated_row)
-            rows_written += 1
+            results.append(first_value / second_value)
 
-    print(f"Processed {rows_written} rows.")
-    print(f"Output written to: {output_csv}")
-    return output_csv
+    return results
+
+
+def process_files(first_csv: Path, second_csv: Path, output_folder: Path | None = None) -> list[float]:
+    """Return the computed error values without writing a CSV file."""
+    del output_folder
+    return compute_column10_error_values(first_csv, second_csv)
 
 
 def main() -> None:
@@ -138,7 +132,9 @@ def main() -> None:
     if not second_csv.exists():
         raise FileNotFoundError(f"Second input CSV not found: {second_csv}")
 
-    process_files(first_csv, second_csv, output_folder=args.output_folder)
+    results = process_files(first_csv, second_csv, output_folder=args.output_folder)
+    print(results)
+    print(f"Processed {len(results)} error values.")
 
 
 if __name__ == "__main__":

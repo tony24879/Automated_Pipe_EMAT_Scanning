@@ -18,6 +18,12 @@ import numpy as np
 from scipy.interpolate import griddata
 
 
+def _path_or_none(value: str | None) -> Path | None:
+    if value is None or value == "":
+        return None
+    return Path(value)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot a Time of Flight heatmap from a CSV file.")
     parser.add_argument(
@@ -46,9 +52,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save",
-        type=Path,
-        default=None,
-        help="Optional output image path for a single CSV input, or output directory for multiple CSV inputs.",
+        type=_path_or_none,
+        default="",
+        help="Optional output image path. If blank or omitted, no image is saved.",
     )
     parser.add_argument(
         "--grid-width",
@@ -91,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         help="Deprecated alias for compatibility; interpolated plots hide points by default.",
     )
     parser.add_argument(
+        "--override-tof-file",
+        type=Path,
+        default=None,
+        help="Optional CSV/text file containing override TOF values for the working CSV.",
+    )
+    parser.add_argument(
         "--interpolation",
         choices=["on", "off"],
         default="on",
@@ -123,7 +135,28 @@ def _to_zero_based(index_1_based: int) -> int:
     return index_1_based - 1
 
 
-def load_points(csv_path: Path, theta_col: int, x_col: int, tof_col: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_override_tof_values(path: Path) -> np.ndarray:
+    values: list[float] = []
+    with path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            for cell in row:
+                text = cell.strip()
+                if not text:
+                    continue
+                values.append(float(text))
+    if not values:
+        raise ValueError(f"No override TOF values found in: {path}")
+    return np.asarray(values, dtype=float)
+
+
+def load_points(
+    csv_path: Path,
+    theta_col: int,
+    x_col: int,
+    tof_col: int,
+    override_tof_values: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     theta_idx = _to_zero_based(theta_col)
     x_idx = _to_zero_based(x_col)
     tof_idx = _to_zero_based(tof_col)
@@ -140,10 +173,15 @@ def load_points(csv_path: Path, theta_col: int, x_col: int, tof_col: int) -> tup
             max_idx = max(theta_idx, x_idx, tof_idx)
             if len(row) <= max_idx:
                 continue
+            raw_theta = row[theta_idx].strip()
+            raw_x = row[x_idx].strip()
+            raw_tof = row[tof_idx].strip()
+            if not raw_theta or not raw_x or not raw_tof:
+                continue
             try:
-                theta = float(row[theta_idx])
-                x = float(row[x_idx])
-                tof = float(row[tof_idx])
+                theta = float(raw_theta)
+                x = float(raw_x)
+                tof = float(raw_tof)
             except ValueError:
                 # Skip header or malformed rows.
                 continue
@@ -156,6 +194,14 @@ def load_points(csv_path: Path, theta_col: int, x_col: int, tof_col: int) -> tup
         raise ValueError(
             "No numeric data points found. Check file path and column indices for theta/x/tof."
         )
+
+    if override_tof_values is not None:
+        if len(override_tof_values) != len(tof_vals):
+            raise ValueError(
+                "Override TOF values length does not match the number of rows in the source CSV. "
+                f"Expected {len(tof_vals)}, got {len(override_tof_values)}."
+            )
+        tof_vals = [float(value) for value in override_tof_values]
 
     return np.array(theta_vals), np.array(x_vals), np.array(tof_vals)
 
@@ -272,8 +318,8 @@ def smooth_heatmap(heat: np.ndarray, sigma: float) -> np.ndarray:
 
 def default_export_path(csv_path: Path, interpolation_enabled: bool) -> Path:
     plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
-    suffix = "interpolated" if interpolation_enabled else "scatter"
-    return plots_dir / f"{csv_path.stem}_tof_heatmap_{suffix}.png"
+    suffix = "heatmap" if not interpolation_enabled else "heatmap_interpolated"
+    return plots_dir / f"{csv_path.stem}_{suffix}.png"
 
 
 def plot_interpolated_heatmap(
@@ -377,6 +423,7 @@ def main() -> None:
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
+    override_tof_values = load_override_tof_values(args.override_tof_file) if args.override_tof_file is not None else None
     datasets: list[tuple[Path, np.ndarray, np.ndarray, np.ndarray]] = []
     for csv_path in csv_files:
         theta, x, tof = load_points(
@@ -384,6 +431,7 @@ def main() -> None:
             theta_col=args.theta_col,
             x_col=args.x_col,
             tof_col=args.tof_col,
+            override_tof_values=override_tof_values,
         )
         theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
         datasets.append((csv_path, theta, x, tof))
@@ -395,19 +443,15 @@ def main() -> None:
     if np.isclose(global_min, global_max):
         global_max = global_min + 1e-12
 
-    if args.save is not None and len(datasets) > 1 and args.save.suffix:
-        raise ValueError(
-            "When plotting multiple CSV files, --save must be a directory path (no file extension)."
-        )
-
     for csv_path, theta, x, tof in datasets:
         if args.save is None:
-            save_path = default_export_path(csv_path, interpolation_enabled)
+            save_path = None
         elif len(datasets) == 1 and args.save.suffix:
             save_path = args.save
         else:
-            suffix = "interpolated" if interpolation_enabled else "scatter"
-            save_path = args.save / f"{csv_path.stem}_tof_heatmap_{suffix}.png"
+            suffix = "heatmap_interpolated" if interpolation_enabled else "heatmap"
+            save_dir = args.save if (not args.save.suffix or args.save.is_dir()) else args.save.parent
+            save_path = save_dir / f"{csv_path.stem}_{suffix}.png"
 
         title_prefix = args.title_prefix.strip()
         if title_prefix:

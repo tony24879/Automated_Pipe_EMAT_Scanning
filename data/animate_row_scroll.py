@@ -4,7 +4,8 @@ Behavior:
 - Reads one CSV file.
 - Selects data rows from --start-row to --end-row (both 1-based, inclusive).
 - Extracts numeric values from column 11 onward (1-based by default).
-- Plots one row waveform at a time and animates by scrolling through rows.
+- Plots one row waveform at a time and animates by scrolling through rows, using the same
+  signal/autocorrelation plot layout and peak-finding logic as plot_row_peaks.py.
 """
 
 from __future__ import annotations
@@ -16,6 +17,23 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import numpy as np
+
+try:
+    from plot_row_peaks import (
+        compute_autocorrelation,
+        draw_signal_and_acf,
+        find_first_acf_peak,
+        find_two_signal_peaks,
+        interpolate_peak_zero_crossing,
+    )
+except ImportError:
+    from data.plot_row_peaks import (
+        compute_autocorrelation,
+        draw_signal_and_acf,
+        find_first_acf_peak,
+        find_two_signal_peaks,
+        interpolate_peak_zero_crossing,
+    )
 
 DEFAULT_SIGNAL_START_COL = 11  # 1-based
 
@@ -92,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         "--no-show",
         action="store_true",
         help="Do not open the animation window; useful with --save in headless runs.",
+    )
+    parser.add_argument(
+        "--peaks",
+        choices=["on", "off"],
+        default="on",
+        help="Toggle plotting of peak markers on the signal and autocorrelation plots (default: on).",
     )
     return parser.parse_args()
 
@@ -196,6 +220,7 @@ def animate_row_signals(
     repeat: bool,
     save_path: Path | None,
     show: bool,
+    show_peaks: bool = True,
 ) -> None:
     if not row_numbers or not signals:
         raise ValueError("No rows/signals available for animation.")
@@ -204,34 +229,96 @@ def animate_row_signals(
         print("No output requested: use --save and/or omit --no-show to render animation.")
         return
 
+    # Precompute peaks/autocorrelation per row up front so each animation frame only redraws.
+    frame_data = []
+    for y in signals:
+        signal_peaks = find_two_signal_peaks(y)
+        raw_peak_indices: list[int] = []
+        interpolated_peak_index = 0.0
+        interpolated_peak_value = 0.0
+        interpolated_second_peak_index: float | None = None
+        interpolated_second_peak_value: float | None = None
+
+        if signal_peaks:
+            raw_peak_index, _, _ = signal_peaks[0]
+            raw_peak_indices.append(raw_peak_index)
+            interpolated_peak_index, interpolated_peak_value = interpolate_peak_zero_crossing(y, raw_peak_index)
+
+            if len(signal_peaks) > 1:
+                second_peak_index, _, _ = signal_peaks[1]
+                raw_peak_indices.append(second_peak_index)
+                interpolated_second_peak_index, interpolated_second_peak_value = interpolate_peak_zero_crossing(
+                    y, second_peak_index
+                )
+
+        acf = compute_autocorrelation(y)
+        acf_peak_indices = find_first_acf_peak(acf)
+
+        frame_data.append(
+            (
+                raw_peak_indices,
+                interpolated_peak_index,
+                interpolated_peak_value,
+                interpolated_second_peak_index,
+                interpolated_second_peak_value,
+                acf,
+                acf_peak_indices,
+            )
+        )
+
     max_len = max(sig.size for sig in signals)
     y_min = min(float(np.min(sig)) for sig in signals)
     y_max = max(float(np.max(sig)) for sig in signals)
     pad = 0.05 * (y_max - y_min) if y_max > y_min else 1.0
 
-    fig, ax = plt.subplots(figsize=(11, 6))
-    (line,) = ax.plot([], [], color="tab:blue", lw=1.5)
-    title = ax.set_title("")
-    ax.set_xlabel("Sample")
-    ax.set_ylabel("Amplitude")
-    ax.grid(alpha=0.25)
-    ax.set_xlim(0, max_len - 1 if max_len > 0 else 1)
-    ax.set_ylim(y_min - pad, y_max + pad)
+    max_acf_len = max(data[5].size for data in frame_data)
+    acf_min = min(float(np.min(data[5])) for data in frame_data if data[5].size)
+    acf_max = max(float(np.max(data[5])) for data in frame_data if data[5].size)
+    acf_pad = 0.05 * (acf_max - acf_min) if acf_max > acf_min else 1.0
 
-    def init() -> tuple:
-        line.set_data([], [])
-        title.set_text(f"Waveform rows from {csv_name}")
-        return line, title
+    fig, (signal_ax, acf_ax) = plt.subplots(2, 1, figsize=(11, 8), sharex=False)
 
     def update(frame_idx: int) -> tuple:
         row = row_numbers[frame_idx]
         y = signals[frame_idx]
-        x = np.arange(y.size)
-        line.set_data(x, y)
-        title.set_text(
-            f"Waveform row {row} from {csv_name} ({frame_idx + 1}/{len(row_numbers)})"
+        (
+            raw_peak_indices,
+            interpolated_peak_index,
+            interpolated_peak_value,
+            interpolated_second_peak_index,
+            interpolated_second_peak_value,
+            acf,
+            acf_peak_indices,
+        ) = frame_data[frame_idx]
+
+        signal_ax.clear()
+        acf_ax.clear()
+
+        title = f"Row {row} waveform from {csv_name} ({frame_idx + 1}/{len(row_numbers)})"
+        draw_signal_and_acf(
+            signal_ax,
+            acf_ax,
+            y,
+            raw_peak_indices,
+            interpolated_peak_index,
+            interpolated_peak_value,
+            interpolated_second_peak_index,
+            interpolated_second_peak_value,
+            acf,
+            acf_peak_indices,
+            title,
+            show_peaks=show_peaks,
         )
-        return line, title
+
+        signal_ax.set_xlim(0, max_len - 1 if max_len > 0 else 1)
+        signal_ax.set_ylim(y_min - pad, y_max + pad)
+        acf_ax.set_xlim(0, max_acf_len - 1 if max_acf_len > 0 else 1)
+        acf_ax.set_ylim(acf_min - acf_pad, acf_max + acf_pad)
+
+        return ()
+
+    def init() -> tuple:
+        return update(0)
 
     animation = FuncAnimation(
         fig,
@@ -282,6 +369,7 @@ def main() -> None:
         repeat=args.repeat,
         save_path=args.save,
         show=not args.no_show,
+        show_peaks=args.peaks == "on",
     )
 
 

@@ -61,6 +61,40 @@ def compute_result(mode: str, estimate: float, col10_value: float):
     return (estimate * 2) / col10_value
 
 
+def calculate_thickness_or_speed_values(input_csv: Path, mode: str, estimate: float) -> list[float]:
+    """Return calculated thickness/speed values for each numeric column-10 entry in the CSV."""
+    results: list[float] = []
+
+    with input_csv.open("r", newline="", encoding="utf-8") as source_file:
+        reader = csv.reader(source_file)
+        first_row = next(reader, None)
+        if first_row is None:
+            return results
+
+        if len(first_row) >= 10:
+            try:
+                first_value = float(first_row[9])
+            except ValueError:
+                pass
+            else:
+                computed = compute_result(mode, estimate, first_value)
+                if computed != "":
+                    results.append(float(computed))
+
+        for row in reader:
+            if len(row) < 10:
+                continue
+            try:
+                col10_value = float(row[9])
+            except ValueError:
+                continue
+            computed = compute_result(mode, estimate, col10_value)
+            if computed != "":
+                results.append(float(computed))
+
+    return results
+
+
 def build_output_path(input_csv: Path, mode: str) -> Path:
     suffix = "_thickness" if mode == "thickness" else "_speed"
     return PROCESSED_DIR / f"{input_csv.stem}{suffix}.csv"
@@ -124,58 +158,9 @@ def main() -> None:
     elif not (input_csv.exists() and input_csv.is_file() and input_csv.suffix.lower() == ".csv"):
         raise FileNotFoundError(f"CSV file not found: {input_csv}")
 
-    output_folder = PROCESSED_DIR if args.output_folder is None else args.output_folder
-    output_folder.mkdir(parents=True, exist_ok=True)
-    output_csv = output_folder / build_output_path(input_csv, mode).name
-
-    result_header = "Thickness" if mode == "thickness" else "Speed of Sound"
-    rows_written = 0
-
-    with input_csv.open("r", newline="", encoding="utf-8") as source_file, output_csv.open(
-        "w", newline="", encoding="utf-8"
-    ) as dest_file:
-        reader = csv.reader(source_file)
-        writer = csv.writer(dest_file)
-
-        first_row = next(reader, None)
-        if first_row is None:
-            writer.writerow(["Column 8", "Column 9", "Column 10", result_header])
-            print(f"Input CSV is empty. Wrote header only to: {output_csv}")
-            return
-
-        has_header = False
-        if len(first_row) >= 10:
-            try:
-                float(first_row[9])
-            except ValueError:
-                # Non-numeric column 10 on first row is treated as header.
-                has_header = True
-
-        if has_header:
-            writer.writerow([first_row[7], first_row[8], first_row[9], result_header])
-        else:
-            writer.writerow(["Column 8", "Column 9", "Column 10", result_header])
-            if len(first_row) >= 10:
-                col10_value = float(first_row[9])
-                result = compute_result(mode, estimate, col10_value)
-                writer.writerow([first_row[7], first_row[8], first_row[9], result])
-                rows_written += 1
-
-        for row in reader:
-            if len(row) < 10:
-                continue
-
-            try:
-                col10_value = float(row[9])
-            except ValueError:
-                continue
-
-            result = compute_result(mode, estimate, col10_value)
-            writer.writerow([row[7], row[8], row[9], result])
-            rows_written += 1
-
-    print(f"Processed {rows_written} data rows.")
-    print(f"Output written to: {output_csv}")
+    results = calculate_thickness_or_speed_values(input_csv, mode, estimate)
+    print(results)
+    print(f"Processed {len(results)} calculated values.")
 
 
 if __name__ == "__main__":

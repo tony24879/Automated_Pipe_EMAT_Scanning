@@ -1,15 +1,10 @@
-"""Apply Hilbert-envelope processing to raw scan CSV signal columns.
-
-Input format expected from sync logger:
-- Columns 1-9: pose/scan metadata
-- Column 10: time of flight (will be recalculated)
-- Columns 11+: signal samples (filtAscan)
+"""Apply optional Hilbert processing to raw scan CSV signal columns.
 
 For each row:
-- Read signal samples from column 11 onward.
-- Apply Hilbert envelope: abs(signal.hilbert(signal_values)).
-- Recompute time of flight using the same logic as emat/sync_logger.py.
-- Write output CSV beside the source file with "_hilbert" appended to filename.
+- Read signal samples from column 11 onward (1-based indexing).
+- If mode is "none", write the original signal samples back unchanged.
+- If mode is "hilbert", write abs(hilbert(signal_values)).
+- Preserve columns 1-10 unchanged and keep the output CSV shape consistent.
 """
 
 from __future__ import annotations
@@ -20,29 +15,6 @@ from pathlib import Path
 
 import numpy as np
 from scipy import signal
-
-
-def compute_time_of_flight(signal_values: list[float]) -> str:
-    """Compute TOF from peak index difference in fixed sample windows."""
-    if len(signal_values) <= 690:
-        return ""
-
-    # Window bounds are sample indices tuned for the expected echo locations in
-    # current hardware geometry; they should track any acquisition retuning.
-    first_start, first_end = 300, 380
-    second_start, second_end = 610, 690
-
-    first_window = signal_values[first_start:first_end + 1]
-    second_window = signal_values[second_start:second_end + 1]
-
-    if not first_window or not second_window:
-        return ""
-
-    first_peak_index = first_start + max(range(len(first_window)), key=first_window.__getitem__)
-    second_peak_index = second_start + max(range(len(second_window)), key=second_window.__getitem__)
-
-    sample_difference = second_peak_index - first_peak_index
-    return str(sample_difference * (20e-9))
 
 
 def parse_signal_columns(row: list[str]) -> list[float]:
@@ -56,67 +28,93 @@ def parse_signal_columns(row: list[str]) -> list[float]:
     return values
 
 
-def process_file(input_path: Path, output_folder: Path | None = None) -> Path:
-    """Process one input CSV and write a sibling *_hilbert.csv file."""
-    if output_folder is None:
-        output_path = input_path.with_name(f"{input_path.stem}_hilbert{input_path.suffix}")
+def process_file(input_path: Path, output_file: Path | None = None, filter_mode: str = "hilbert") -> Path:
+    """Process one input CSV and write a filtered output CSV without changing metadata columns."""
+    mode = filter_mode.lower()
+    if mode not in {"none", "hilbert"}:
+        raise ValueError(f"Unsupported filter mode: {filter_mode!r}")
+
+    if output_file is None:
+        output_path = input_path.with_name(f"{input_path.stem}_processed{input_path.suffix}")
     else:
-        output_folder.mkdir(parents=True, exist_ok=True)
-        output_path = output_folder / f"{input_path.stem}_hilbert{input_path.suffix}"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_path = output_file
 
-    with input_path.open("r", newline="", encoding="utf-8") as infile, output_path.open(
-        "w", newline="", encoding="utf-8"
-    ) as outfile:
+    if input_path.resolve() == output_path.resolve():
+        temp_path = output_path.with_name(f"{output_path.stem}_tmp{output_path.suffix}")
+    else:
+        temp_path = output_path
+
+    with input_path.open("r", newline="", encoding="utf-8") as infile:
         reader = csv.reader(infile)
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError(f"Input file is empty: {input_path}")
+
+    processed_rows: list[list[str]] = []
+    header = rows[0]
+    processed_rows.append(header)
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        if not row:
+            processed_rows.append(row)
+            continue
+
+        prefix = row[:10]
+        try:
+            raw_signal = parse_signal_columns(row)
+        except ValueError as exc:
+            raise ValueError(f"Failed parsing signal values at row {row_idx}: {exc}") from exc
+
+        if not raw_signal:
+            processed_rows.append(row)
+            continue
+
+        signal_values = np.asarray(raw_signal, dtype=float)
+        if mode == "hilbert":
+            filtered_signal = np.abs(signal.hilbert(signal_values))
+        else:
+            filtered_signal = signal_values
+
+        processed_rows.append([*prefix, *filtered_signal.tolist()])
+
+    with temp_path.open("w", newline="", encoding="utf-8") as outfile:
         writer = csv.writer(outfile)
+        writer.writerows(processed_rows)
 
-        header = next(reader, None)
-        if header is None:
-            raise ValueError(f"Input file is empty: {input_path}")
-
-        signal_headers = header[10:]
-        out_header = [*header[:9], "Time of Flight (s)", *signal_headers]
-        writer.writerow(out_header)
-
-        for row_idx, row in enumerate(reader, start=2):
-            if not row:
-                continue
-
-            # Preserve metadata columns exactly and only transform signal + TOF.
-            prefix = row[:9]
-            try:
-                raw_signal = parse_signal_columns(row)
-            except ValueError as exc:
-                raise ValueError(f"Failed parsing signal values at row {row_idx}: {exc}") from exc
-
-            if not raw_signal:
-                writer.writerow([*prefix, "", *row[10:]])
-                continue
-
-            raw_signal_np = np.asarray(raw_signal, dtype=float)
-            hilbert_signal = np.abs(signal.hilbert(raw_signal_np))
-            hilbert_signal_list = hilbert_signal.tolist()
-
-            tof = compute_time_of_flight(hilbert_signal_list)
-            writer.writerow([*prefix, tof, *hilbert_signal_list])
+    if temp_path != output_path:
+        temp_path.replace(output_path)
 
     return output_path
 
 
 def resolve_input_path(raw_file: str) -> Path:
-    """Resolve input path relative to data/raw when not absolute."""
+    """Resolve input paths in a forgiving way for repo-relative and raw-dir paths."""
     candidate = Path(raw_file)
     if candidate.is_absolute():
         return candidate
 
     project_root = Path(__file__).resolve().parents[1]
     raw_dir = project_root / "data" / "raw"
-    return raw_dir / raw_file
+
+    candidates = [
+        project_root / candidate,
+        raw_dir / candidate,
+        raw_dir / candidate.name,
+        candidate,
+    ]
+
+    for possible in candidates:
+        if possible.exists():
+            return possible
+
+    return candidates[0]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apply Hilbert envelope to scan CSV signal columns and recalculate TOF."
+        description="Apply a no-op or Hilbert filter to scan CSV signal columns."
     )
     parser.add_argument(
         "input_csv",
@@ -125,10 +123,22 @@ def main() -> None:
         help="Input CSV file name in data/raw (or an absolute path).",
     )
     parser.add_argument(
+        "--mode",
+        choices=["none", "hilbert"],
+        default="hilbert",
+        help="Filter mode to apply to columns 11+ (default: hilbert).",
+    )
+    parser.add_argument(
         "--output-folder",
         type=Path,
         default=None,
-        help="Optional output folder for the *_hilbert CSV.",
+        help="Optional output folder for the processed CSV.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Optional full output CSV path. Overrides --output-folder when set.",
     )
     args = parser.parse_args()
 
@@ -136,8 +146,15 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_path}")
 
-    output_path = process_file(input_path, output_folder=args.output_folder)
-    print(f"Wrote Hilbert-processed CSV: {output_path}")
+    if args.output_folder is not None and args.output_file is not None:
+        raise ValueError("Use either --output-folder or --output-file, not both.")
+
+    output_target = args.output_file
+    if output_target is None and args.output_folder is not None:
+        output_target = args.output_folder / f"{input_path.stem}_processed{input_path.suffix}"
+
+    output_path = process_file(input_path, output_file=output_target, filter_mode=args.mode)
+    print(f"Wrote filtered CSV: {output_path}")
 
 
 if __name__ == "__main__":

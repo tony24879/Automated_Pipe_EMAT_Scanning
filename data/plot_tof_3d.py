@@ -14,7 +14,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from data.plot_tof_heatmap import average_duplicate_points, load_points
+try:
+    from data.plot_tof_heatmap import average_duplicate_points, load_points
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from plot_tof_heatmap import average_duplicate_points, load_points
+
+
+def _path_or_none(value: str | None) -> Path | None:
+    if value is None or value == "":
+        return None
+    return Path(value)
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,9 +54,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save",
-        type=Path,
-        default=None,
-        help="Optional output image path for a single CSV input, or output directory for multiple CSV inputs.",
+        type=_path_or_none,
+        default="",
+        help="Optional output image path. If blank or omitted, no image is saved.",
     )
     parser.add_argument(
         "--plot-type",
@@ -89,14 +98,26 @@ def parse_args() -> argparse.Namespace:
         "--cbar-label",
         type=str,
         default="Time of Flight (s)",
-        help="Label for the color bar.",
+        help="Label for the color bar and z-axis.",
+    )
+    parser.add_argument(
+        "--z-label",
+        type=str,
+        default=None,
+        help="Optional override for the z-axis label. Defaults to the color bar label.",
+    )
+    parser.add_argument(
+        "--override-tof-file",
+        type=Path,
+        default=None,
+        help="Optional CSV/text file containing override TOF values for the working CSV.",
     )
     return parser.parse_args()
 
 
 def default_export_path(csv_path: Path, plot_type: str) -> Path:
     plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
-    return plots_dir / f"{csv_path.stem}_tof_3d_{plot_type}.png"
+    return plots_dir / f"{csv_path.stem}_{plot_type}_3d.png"
 
 
 def plot_3d(
@@ -113,6 +134,7 @@ def plot_3d(
     vmax: float,
     title: str,
     cbar_label: str,
+    z_label: str,
 ) -> None:
     fig = plt.figure(figsize=(10, 7))
     axis = fig.add_subplot(111, projection="3d")
@@ -145,7 +167,7 @@ def plot_3d(
 
     axis.set_xlabel("axis position (mm)")
     axis.set_ylabel("theta (deg)")
-    axis.set_zlabel("ToF (s)")
+    axis.set_zlabel(z_label)
     axis.set_title(title)
     axis.view_init(elev=elev, azim=azim)
 
@@ -168,6 +190,13 @@ def main() -> None:
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
+    override_tof_values = None
+    if args.override_tof_file is not None:
+        if len(csv_files) > 1:
+            raise ValueError("Override TOF values are only supported for a single plotted CSV.")
+        with args.override_tof_file.open("r", newline="", encoding="utf-8") as fh:
+            override_tof_values = np.asarray([float(line.strip()) for line in fh if line.strip()], dtype=float)
+
     datasets: list[tuple[Path, np.ndarray, np.ndarray, np.ndarray]] = []
     for csv_path in csv_files:
         theta, x, tof = load_points(
@@ -175,6 +204,7 @@ def main() -> None:
             theta_col=args.theta_col,
             x_col=args.x_col,
             tof_col=args.tof_col,
+            override_tof_values=override_tof_values,
         )
         theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
         datasets.append((csv_path, theta, x, tof))
@@ -184,18 +214,14 @@ def main() -> None:
     if np.isclose(global_min, global_max):
         global_max = global_min + 1e-12
 
-    if args.save is not None and len(datasets) > 1 and args.save.suffix:
-        raise ValueError(
-            "When plotting multiple CSV files, --save must be a directory path (no file extension)."
-        )
-
     for csv_path, theta, x, tof in datasets:
         if args.save is None:
-            save_path = default_export_path(csv_path, args.plot_type)
+            save_path = None
         elif len(datasets) == 1 and args.save.suffix:
             save_path = args.save
         else:
-            save_path = args.save / f"{csv_path.stem}_tof_3d_{args.plot_type}.png"
+            save_dir = args.save if (not args.save.suffix or args.save.is_dir()) else args.save.parent
+            save_path = save_dir / f"{csv_path.stem}_{args.plot_type}_3d.png"
 
         title_prefix = args.title_prefix.strip()
         if title_prefix:
@@ -203,6 +229,7 @@ def main() -> None:
         else:
             title = csv_path.stem
 
+        color_label = args.z_label.strip() if args.z_label else args.cbar_label.strip()
         plot_3d(
             x=x,
             theta=theta,
@@ -216,7 +243,8 @@ def main() -> None:
             vmin=global_min,
             vmax=global_max,
             title=title,
-            cbar_label=args.cbar_label,
+            cbar_label=color_label,
+            z_label=color_label,
         )
 
 
