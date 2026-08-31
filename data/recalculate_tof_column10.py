@@ -20,7 +20,7 @@ from scipy.signal import find_peaks
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 SKIP_SAMPLES = 200
 MIN_PEAK_DISTANCE = 250
-MIN_PROMINENCE = 30
+MIN_PROMINENCE = 100
 TOF_SCALE_SECONDS = 20e-9
 SIGNAL_START_COL_1_BASED = 11
 
@@ -83,7 +83,7 @@ def interpolate_peak_zero_crossing(signal: np.ndarray, peak_idx: int) -> tuple[f
 
 
 def find_two_signal_peaks(signal_values: list[float]) -> tuple[int, int] | None:
-    """Return the two strongest adjacent same-polarity peaks using the row-plot workflow."""
+    """Return the first two same-polarity peaks using the row-plot workflow."""
     if len(signal_values) <= SKIP_SAMPLES + 1:
         return None
 
@@ -122,10 +122,7 @@ def find_two_signal_peaks(signal_values: list[float]) -> tuple[int, int] | None:
     if len(same_polarity_peaks) < 2:
         return None
 
-    second_peak = max(
-        same_polarity_peaks[1:],
-        key=lambda item: abs(item[2]),
-    )
+    second_peak = same_polarity_peaks[1]
     return first_peak_index, second_peak[0]
 
 

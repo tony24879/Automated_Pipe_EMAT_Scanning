@@ -20,7 +20,7 @@ from scipy.signal import find_peaks
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 SKIP_SAMPLES = 200
 MIN_PEAK_DISTANCE = 250
-MIN_PROMINENCE = 30
+MIN_PROMINENCE = 100
 TOF_SCALE_SECONDS = 20e-9
 PEAK_SAMPLE_OFFSET = 34
 SIGNAL_START_COL_1_BASED = 11

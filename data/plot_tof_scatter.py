@@ -1,8 +1,10 @@
-"""Plot a vertical box-and-whisker chart of Time of Flight values from CSV files.
+"""Plot Time of Flight values from CSV files as a scatter plot with a line of best fit.
 
 Default behavior:
 - Reads TOF values from column 10 (1-based)
-- Accepts one or more CSV files and plots them on the same y-axis
+- x-axis is the index of the value within its dataset, y-axis is the value itself
+- Accepts one or more CSV files and plots them on the same axes, each with its own
+  color and line of best fit
 - Saves output image to data/processed/plots when requested
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -115,54 +118,55 @@ def load_override_tof_values(path: Path) -> np.ndarray:
 
 def default_export_path(csv_path: Path) -> Path:
     plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
-    return plots_dir / f"{csv_path.stem}_boxplot.png"
+    return plots_dir / f"{csv_path.stem}_scatter.png"
 
 
-def plot_boxplot(
-    datasets: list[tuple[Path, np.ndarray]],
+def plot_scatter(
+    datasets: list[tuple[str, np.ndarray]],
     title: str,
     y_label: str,
     save_path: Path | None,
 ) -> None:
-    labels = [csv_path.stem for csv_path, _ in datasets]
-    data = [values for _, values in datasets]
-
     fig, ax = plt.subplots(figsize=(10, 6))
-    bp = ax.boxplot(
-        data,
-        vert=True,
-        patch_artist=True,
-        labels=labels,
-        widths=0.5,
-        medianprops={"color": "black"},
-        boxprops={"color": "black"},
-        whiskerprops={"color": "black"},
-        capprops={"color": "black"},
-    )
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    for box in bp["boxes"]:
-        box.set(facecolor="lightsteelblue", alpha=0.85)
+    for i, (label, values) in enumerate(datasets):
+        color = color_cycle[i % len(color_cycle)]
+        indices = np.arange(len(values))
+        ax.scatter(indices, values, color=color, alpha=0.7, s=18, label=label)
 
-    ax.set_title(title)
+        if len(values) >= 2:
+            slope, intercept = np.polyfit(indices, values, 1)
+            fit_line = slope * indices + intercept
+            ax.plot(indices, fit_line, color=color, linewidth=2, linestyle="--")
+
+    ax.set_xlabel("Index")
     ax.set_ylabel(y_label)
-    ax.grid(axis="y", alpha=0.25)
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+    if len(datasets) > 1:
+        ax.legend()
     fig.tight_layout()
 
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=200)
-        print(f"Saved box plot image to: {save_path}")
+        print(f"Saved scatter plot image to: {save_path}")
+
+
+def _slugify(label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot a vertical box-and-whisker chart of Time of Flight values from one or more CSV files."
+        description="Plot Time of Flight values from one or more CSV files as an index-vs-value scatter plot."
     )
     parser.add_argument(
         "csv_files",
         type=Path,
         nargs="+",
-        help="One or more input CSV files to compare on the same boxplot axis.",
+        help="One or more input CSV files to compare on the same scatter axis.",
     )
     parser.add_argument(
         "--tof-col",
@@ -179,8 +183,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--title",
         type=str,
-        default="Time of Flight Box Plot",
-        help="Title to display above the box plot.",
+        default="Time of Flight Scatter Plot",
+        help="Title to display above the scatter plot.",
     )
     parser.add_argument(
         "--y-label",
@@ -207,8 +211,16 @@ def parse_args() -> argparse.Namespace:
         "--group-by-repeat-point",
         action="store_true",
         help=(
-            "Group rows when column 8 or 9 changes and generate one box plot per group "
-            "for each input CSV."
+            "Group rows when column 8 or 9 changes and plot each group as its own "
+            "dataset with its own color and line of best fit."
+        ),
+    )
+    parser.add_argument(
+        "--separate-plots",
+        action="store_true",
+        help=(
+            "Plot each dataset (each CSV, or each group when --group-by-repeat-point is set) "
+            "on its own figure instead of combining them onto a single plot."
         ),
     )
     return parser.parse_args()
@@ -231,49 +243,50 @@ def main() -> None:
         else [None] * len(args.csv_files)
     )
 
-    datasets: list[tuple[Path, np.ndarray]] = []
-    grouped_datasets: list[tuple[Path, list[np.ndarray]]] = []
+    datasets: list[tuple[str, np.ndarray]] = []
 
     for csv_path, override_values in zip(args.csv_files, override_values_by_csv):
         if args.group_by_repeat_point:
-            grouped_datasets.append(
-                (csv_path, load_grouped_tof_values(csv_path, args.tof_col, override_values=override_values))
-            )
-            continue
-
-        if override_values is not None:
-            datasets.append((csv_path, override_values))
+            groups = load_grouped_tof_values(csv_path, args.tof_col, override_values=override_values)
+            for idx, group_values in enumerate(groups, start=1):
+                label = f"{csv_path.stem} - Group {idx}" if len(args.csv_files) > 1 else f"Group {idx}"
+                datasets.append((label, group_values))
         else:
-            datasets.append((csv_path, load_tof_values(csv_path, args.tof_col)))
+            if override_values is not None:
+                values = override_values
+            else:
+                values = load_tof_values(csv_path, args.tof_col)
+            datasets.append((csv_path.stem, values))
 
-    title = args.title.strip() if args.title and args.title.strip() else "Time of Flight Box Plot"
+    title = args.title.strip() if args.title and args.title.strip() else "Time of Flight Scatter Plot"
     y_label = args.y_label.strip() if args.y_label and args.y_label.strip() else "Time of Flight (s)"
 
-    save_path: Path | None = None
+    save_arg: Path | None = None
     if args.save not in (None, ""):
-        save_path = Path(args.save)
-        if save_path.suffix == "" and not args.group_by_repeat_point:
-            save_path = save_path / f"{datasets[0][0].stem}_boxplot.png"
+        save_arg = Path(args.save)
 
-    if not args.group_by_repeat_point and save_path is None and len(datasets) == 1:
-        save_path = default_export_path(datasets[0][0])
+    if args.separate_plots:
+        for label, values in datasets:
+            dataset_title = f"{title}\n{label}" if len(datasets) > 1 else title
 
-    if args.group_by_repeat_point:
-        for csv_path, groups in grouped_datasets:
-            for idx, group_values in enumerate(groups, start=1):
-                group_title = f"{title}\n{csv_path.name} - Group {idx}"
-                group_dataset = [(csv_path, group_values)]
+            if save_arg is None:
+                dataset_save_path = None
+            elif save_arg.suffix:
+                dataset_save_path = save_arg.parent / f"{save_arg.stem}_{_slugify(label)}{save_arg.suffix}"
+            else:
+                dataset_save_path = save_arg / f"{_slugify(label)}_scatter.png"
 
-                group_save_path: Path | None = None
-                if save_path is not None:
-                    if save_path.suffix:
-                        group_save_path = save_path.parent / f"{save_path.stem}_{csv_path.stem}_group_{idx}{save_path.suffix}"
-                    else:
-                        group_save_path = save_path / f"{csv_path.stem}_group_{idx}_boxplot.png"
-
-                plot_boxplot(group_dataset, title=group_title, y_label=y_label, save_path=group_save_path)
+            plot_scatter([(label, values)], title=dataset_title, y_label=y_label, save_path=dataset_save_path)
     else:
-        plot_boxplot(datasets, title=title, y_label=y_label, save_path=save_path)
+        save_path: Path | None = None
+        if save_arg is not None:
+            save_path = save_arg
+            if save_path.suffix == "":
+                save_path = save_path / f"{args.csv_files[0].stem}_scatter.png"
+        elif len(args.csv_files) == 1 and not args.group_by_repeat_point:
+            save_path = default_export_path(args.csv_files[0])
+
+        plot_scatter(datasets, title=title, y_label=y_label, save_path=save_path)
 
     if args.no_show:
         plt.close("all")

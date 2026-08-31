@@ -15,9 +15,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 try:
-    from repeat_point_grouping import grouped_tof_values, group_rows_by_repeat_point
+    from repeat_point_grouping import (
+        grouped_tof_values,
+        group_rows_by_repeat_point,
+        group_row_indices_by_repeat_point,
+    )
 except ModuleNotFoundError:
-    from data.repeat_point_grouping import grouped_tof_values, group_rows_by_repeat_point
+    from data.repeat_point_grouping import (
+        grouped_tof_values,
+        group_rows_by_repeat_point,
+        group_row_indices_by_repeat_point,
+    )
 
 
 def _path_or_none(value: str | None) -> Path | None:
@@ -74,8 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--override-tof-file",
         type=Path,
+        nargs="+",
         default=None,
-        help="Optional CSV/text file containing override TOF values for the selected data rows.",
+        help=(
+            "Optional CSV/text file(s) containing override TOF values for the selected data rows, "
+            "one per input CSV (in the same order)."
+        ),
     )
     parser.add_argument(
         "--group-by-repeat-point",
@@ -161,19 +173,16 @@ def load_grouped_tof_values(
     if override_values is None:
         return [np.asarray(group, dtype=float) for group in grouped_tof_values(grouped_rows, tof_col=tof_col)]
 
-    required_count = sum(len(group) for group in grouped_rows)
+    group_indices = group_row_indices_by_repeat_point(rows, tof_col=tof_col, key_cols=(8, 9), skip_header=True)
+    required_count = sum(len(indices) for indices in group_indices)
     if len(override_values) != required_count:
         raise ValueError(
             "Override TOF length does not match grouped data row count. "
             f"Expected {required_count}, got {len(override_values)}."
         )
 
-    grouped_values: list[np.ndarray] = []
-    cursor = 0
-    for group in grouped_rows:
-        count = len(group)
-        grouped_values.append(np.asarray(override_values[cursor : cursor + count], dtype=float))
-        cursor += count
+    override_array = np.asarray(override_values, dtype=float)
+    grouped_values: list[np.ndarray] = [override_array[indices] for indices in group_indices]
     return grouped_values
 
 
@@ -218,9 +227,15 @@ def main() -> None:
         if not csv_path.exists():
             raise FileNotFoundError(f"Input CSV not found: {csv_path}")
 
-    override_values = load_override_tof_values(args.override_tof_file) if args.override_tof_file is not None else None
-    if override_values is not None and len(csv_files) > 1:
-        raise ValueError("Override TOF values are only supported for a single plotted CSV.")
+    if args.override_tof_file is not None and len(args.override_tof_file) != len(csv_files):
+        raise ValueError(
+            "Number of --override-tof-file entries must match the number of input CSV files."
+        )
+    override_values_by_csv: list[np.ndarray | None] = (
+        [load_override_tof_values(path) for path in args.override_tof_file]
+        if args.override_tof_file is not None
+        else [None] * len(csv_files)
+    )
 
     save_arg: Path | None = None
     if args.save not in (None, ""):
@@ -228,7 +243,7 @@ def main() -> None:
 
     datasets: list[tuple[Path, np.ndarray]] = []
     grouped_datasets: list[tuple[Path, list[np.ndarray]]] = []
-    for csv_path in csv_files:
+    for csv_path, override_values in zip(csv_files, override_values_by_csv):
         if args.group_by_repeat_point:
             grouped_datasets.append(
                 (csv_path, load_grouped_tof_values(csv_path, args.tof_col, override_values=override_values))

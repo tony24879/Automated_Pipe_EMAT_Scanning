@@ -28,7 +28,7 @@ RAW_DIR = Path(__file__).resolve().parent / "raw"
 # Keep these aligned with the row peak-detection workflow in plot_row_peaks.py.
 SKIP_SAMPLES = 200
 MIN_PEAK_DISTANCE = 250
-MIN_PROMINENCE = 30
+MIN_PROMINENCE = 100
 TOF_SCALE_SECONDS = 20e-9
 
 
@@ -112,7 +112,7 @@ def find_first_peak_in_branch(signal_values: list[float]) -> tuple[int, str, flo
 
 
 def find_peak_sequence(signal_values: list[float], num_peaks: int) -> list[int]:
-    """Return peaks from the same polarity branch, starting with the strongest first peak."""
+    """Return the first peaks from the branch selected by the strongest first peak."""
     if num_peaks < 2:
         raise ValueError("num_peaks must be at least 2.")
 
@@ -150,17 +150,7 @@ def find_peak_sequence(signal_values: list[float], num_peaks: int) -> list[int]:
 
     first_peak = max(first_candidates, key=lambda item: abs(item[2]))
     same_polarity_peaks = positive_peaks if first_peak[1] == "normal" else negative_peaks
-    selected = [first_peak]
-
-    remaining_same_branch = sorted(
-        same_polarity_peaks[1:],
-        key=lambda peak: abs(peak[2]),
-        reverse=True,
-    )
-    for peak in remaining_same_branch:
-        if len(selected) >= num_peaks:
-            break
-        selected.append(peak)
+    selected = [first_peak, *same_polarity_peaks[1:num_peaks]]
 
     return [peak[0] for peak in selected]
 

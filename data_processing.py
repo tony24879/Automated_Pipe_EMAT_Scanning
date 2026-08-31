@@ -732,8 +732,133 @@ def _build_signal_plotting_section(parent: tk.Widget, working_csv_var: tk.String
     tk.Button(section, text="Animate", width=10, command=animate_rows).grid(row=4, column=2, sticky="w")
 
 
+def _parse_numeric_list(stdout_text: str) -> list[float]:
+    for match in reversed(re.findall(r"\[[^\]]+\]", stdout_text)):
+        try:
+            parsed = ast.literal_eval(match)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, (list, tuple)):
+            return [float(value) for value in parsed]
+    return []
+
+
+def _write_temp_override_file(values: list[float]) -> str:
+    fh = tempfile.NamedTemporaryFile("w", prefix="plot_override_", suffix=".csv", delete=False, encoding="utf-8")
+    with fh:
+        for value in values:
+            fh.write(f"{float(value)}\n")
+    return fh.name
+
+
+class _PlotValueError(Exception):
+    """Raised when computing a Plotted Values override fails; carries a dialog title/message."""
+
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__(message)
+        self.title = title
+        self.message = message
+
+
+def _plot_value_type_suffix(mode: str) -> str:
+    return mode.strip().lower() or "tof"
+
+
+def _compute_plot_value_override(
+    mode: str,
+    working_csv: str,
+    speed_estimate_str: str,
+    thickness_estimate_str: str,
+    second_csv: str,
+) -> str | None:
+    """Run the calculation matching Plotted Values mode and return an override file path, if any."""
+    if mode == "ToF":
+        return None
+
+    if mode in {"Thickness", "Speed"}:
+        calc_mode = "thickness" if mode == "Thickness" else "speed"
+        estimate_str = speed_estimate_str if mode == "Thickness" else thickness_estimate_str
+        try:
+            estimate = float(estimate_str.strip())
+        except ValueError:
+            raise _PlotValueError(
+                "Invalid Input",
+                f"{'Speed Estimate' if mode == 'Thickness' else 'Thickness Estimate'} must be numeric.",
+            )
+
+        args = [
+            sys.executable,
+            str(PROJECT_ROOT / "data" / "calculate_thickness_or_speed.py"),
+            "--mode",
+            calc_mode,
+            "--estimate",
+            str(estimate),
+            "--input-csv",
+            working_csv,
+        ]
+        result = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT), check=False)
+        if result.returncode != 0:
+            error_text = (result.stderr or result.stdout or "Calculation failed.").strip()
+            raise _PlotValueError("Calculation Error", error_text)
+        values = _parse_numeric_list(result.stdout)
+        if not values:
+            raise _PlotValueError("Calculation Error", "The calculated values list was empty.")
+        return _write_temp_override_file(values)
+
+    if mode == "Errors":
+        if not second_csv:
+            raise _PlotValueError("Missing CSV", "Please select the second input CSV for the Errors plot.")
+        args = [
+            sys.executable,
+            str(PROJECT_ROOT / "data" / "compute_column10_errors.py"),
+            working_csv,
+            second_csv,
+        ]
+        result = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT), check=False)
+        if result.returncode != 0:
+            error_text = (result.stderr or result.stdout or "Calculation failed.").strip()
+            raise _PlotValueError("Calculation Error", error_text)
+        values = _parse_numeric_list(result.stdout)
+        if not values:
+            raise _PlotValueError("Calculation Error", "The error values list was empty.")
+        return _write_temp_override_file(values)
+
+    return None
+
+
+def _compute_plot_value_overrides(
+    mode: str,
+    csv_paths: list[str],
+    speed_estimate_str: str,
+    thickness_estimate_str: str,
+    second_csv_paths: list[str],
+) -> list[str | None]:
+    """Compute a Plotted Values override for each CSV in csv_paths (mirrors _compute_plot_value_override)."""
+    if mode == "ToF":
+        return [None for _ in csv_paths]
+
+    if mode == "Errors":
+        if len(second_csv_paths) == 1:
+            second_csv_paths = second_csv_paths * len(csv_paths)
+        if len(second_csv_paths) != len(csv_paths):
+            raise _PlotValueError(
+                "Missing CSV",
+                "Please provide a second input CSV for each main CSV (separate multiple paths with ';'), "
+                "or a single second CSV to reuse for all of them.",
+            )
+        return [
+            _compute_plot_value_override(mode, csv_path, speed_estimate_str, thickness_estimate_str, second_csv)
+            for csv_path, second_csv in zip(csv_paths, second_csv_paths)
+        ]
+
+    return [
+        _compute_plot_value_override(mode, csv_path, speed_estimate_str, thickness_estimate_str, "")
+        for csv_path in csv_paths
+    ]
+
+
 def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> None:
-    section = tk.LabelFrame(parent, text="Plots", padx=12, pady=10)
+    section = tk.LabelFrame(parent, text="Results Plotting", padx=12, pady=10)
     section.pack(fill="x", pady=(0, 14))
 
     def _require_working_csv() -> str | None:
@@ -751,7 +876,7 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         )
         return list(paths)
 
-    def _browse_output_file(var: tk.StringVar, working_csv_var: tk.StringVar, suffix: str) -> None:
+    def _browse_output_file(var: tk.StringVar, working_csv_var: tk.StringVar, suffix: str, value_mode: str) -> None:
         output_dir = PROCESSED_DIR / "plots"
         output_dir.mkdir(parents=True, exist_ok=True)
         folder = filedialog.askdirectory(
@@ -763,92 +888,47 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
 
         working_csv = working_csv_var.get().strip()
         stem = Path(working_csv).stem if working_csv else "plot"
-        var.set(str(Path(folder) / f"{stem}{suffix}.png"))
+        value_suffix = _plot_value_type_suffix(value_mode)
+        var.set(str(Path(folder) / f"{stem}{suffix}_{value_suffix}.png"))
 
-    def _plot_output_default(working_csv: str, suffix: str) -> str:
+    def _plot_output_default(working_csv: str, suffix: str, value_mode: str) -> str:
         if not working_csv:
             return ""
         stem = Path(working_csv).stem
-        return str(PROCESSED_DIR / "plots" / f"{stem}{suffix}.png")
-
-    def _parse_numeric_list(stdout_text: str) -> list[float]:
-        for match in reversed(re.findall(r"\[[^\]]+\]", stdout_text)):
-            try:
-                parsed = ast.literal_eval(match)
-            except (ValueError, SyntaxError):
-                continue
-            if isinstance(parsed, (list, tuple)):
-                return [float(value) for value in parsed]
-        return []
-
-    def _write_temp_override_file(values: list[float]) -> str:
-        fh = tempfile.NamedTemporaryFile("w", prefix="plot_override_", suffix=".csv", delete=False, encoding="utf-8")
-        with fh:
-            for value in values:
-                fh.write(f"{float(value)}\n")
-        return fh.name
+        value_suffix = _plot_value_type_suffix(value_mode)
+        return str(PROCESSED_DIR / "plots" / f"{stem}{suffix}_{value_suffix}.png")
 
     def _build_plot_value_override(mode: str, working_csv: str) -> str | None:
-        if mode == "ToF":
+        try:
+            return _compute_plot_value_override(
+                mode,
+                working_csv,
+                speed_estimate_var.get(),
+                thickness_estimate_var.get(),
+                second_csv_var.get().strip(),
+            )
+        except _PlotValueError as exc:
+            messagebox.showerror(exc.title, exc.message)
+            return ""
+
+    def _build_plot_value_overrides(mode: str, csv_paths: list[str]) -> list[str | None] | None:
+        second_csv_text = second_csv_var.get().strip()
+        second_csv_paths = [part.strip() for part in second_csv_text.split(";") if part.strip()]
+        try:
+            return _compute_plot_value_overrides(
+                mode,
+                csv_paths,
+                speed_estimate_var.get(),
+                thickness_estimate_var.get(),
+                second_csv_paths,
+            )
+        except _PlotValueError as exc:
+            messagebox.showerror(exc.title, exc.message)
             return None
-
-        if mode in {"Thickness", "Speed"}:
-            calc_mode = "thickness" if mode == "Thickness" else "speed"
-            estimate_var = speed_estimate_var if mode == "Thickness" else thickness_estimate_var
-            try:
-                estimate = float(estimate_var.get().strip())
-            except ValueError:
-                messagebox.showerror("Invalid Input", f"{ 'Speed Estimate' if mode == 'Thickness' else 'Thickness Estimate' } must be numeric.")
-                return ""
-
-            args = [
-                sys.executable,
-                str(PROJECT_ROOT / "data" / "calculate_thickness_or_speed.py"),
-                "--mode",
-                calc_mode,
-                "--estimate",
-                str(estimate),
-                "--input-csv",
-                working_csv,
-            ]
-            result = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT), check=False)
-            if result.returncode != 0:
-                error_text = (result.stderr or result.stdout or "Calculation failed.").strip()
-                messagebox.showerror("Calculation Error", error_text)
-                return ""
-            values = _parse_numeric_list(result.stdout)
-            if not values:
-                messagebox.showerror("Calculation Error", "The calculated values list was empty.")
-                return ""
-            return _write_temp_override_file(values)
-
-        if mode == "Errors":
-            second_csv = second_csv_var.get().strip()
-            if not second_csv:
-                messagebox.showerror("Missing CSV", "Please select the second input CSV for the Errors plot.")
-                return ""
-            args = [
-                sys.executable,
-                str(PROJECT_ROOT / "data" / "compute_column10_errors.py"),
-                working_csv,
-                second_csv,
-            ]
-            result = subprocess.run(args, capture_output=True, text=True, cwd=str(PROJECT_ROOT), check=False)
-            if result.returncode != 0:
-                error_text = (result.stderr or result.stdout or "Calculation failed.").strip()
-                messagebox.showerror("Calculation Error", error_text)
-                return ""
-            values = _parse_numeric_list(result.stdout)
-            if not values:
-                messagebox.showerror("Calculation Error", "The error values list was empty.")
-                return ""
-            return _write_temp_override_file(values)
-
-        return None
 
     plot_kind_var = tk.StringVar(value="histogram")
     tk.Label(section, text="Select plot:").grid(row=0, column=0, sticky="w")
-    tk.OptionMenu(section, plot_kind_var, "histogram", "heatmap", "3d", "boxplot").grid(row=0, column=1, sticky="w", padx=(8, 0))
+    tk.OptionMenu(section, plot_kind_var, "histogram", "heatmap", "3d", "3d-polar", "boxplot", "scatter").grid(row=0, column=1, sticky="w", padx=(8, 0))
 
     plot_value_mode_var = tk.StringVar(value="ToF")
     speed_estimate_var = tk.StringVar(value="1500")
@@ -864,7 +944,7 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     speed_estimate_entry = tk.Entry(section, textvariable=speed_estimate_var, width=20)
     thickness_estimate_label = tk.Label(section, text="Thickness Estimate (m):")
     thickness_estimate_entry = tk.Entry(section, textvariable=thickness_estimate_var, width=20)
-    second_csv_label = tk.Label(section, text="Second Input CSV:")
+    second_csv_label = tk.Label(section, text="Second Input CSV(s):")
     second_csv_entry = tk.Entry(section, textvariable=second_csv_var, width=40)
     second_csv_browse = tk.Button(section, text="Browse...", width=12)
 
@@ -890,13 +970,13 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
             second_csv_browse.grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
 
     def browse_second_csv() -> None:
-        path = filedialog.askopenfilename(
-            title="Second input CSV for error plot",
+        paths = filedialog.askopenfilenames(
+            title="Second input CSV(s) for error plot (one per main CSV, in order)",
             initialdir=str(PROCESSED_DIR if PROCESSED_DIR.exists() else PROJECT_ROOT),
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
-        if path:
-            second_csv_var.set(path)
+        if paths:
+            second_csv_var.set("; ".join(paths))
 
     second_csv_browse.configure(command=browse_second_csv)
     plot_value_mode_var.trace_add("write", _toggle_value_inputs)
@@ -913,8 +993,17 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     hist_panel = _panel_for("histogram")
     heat_panel = _panel_for("heatmap")
     plot3_panel = _panel_for("3d")
+    polar3_panel = _panel_for("3d-polar")
     box_panel = _panel_for("boxplot")
-    panels = {"histogram": hist_panel, "heatmap": heat_panel, "3d": plot3_panel, "boxplot": box_panel}
+    scatter_panel = _panel_for("scatter")
+    panels = {
+        "histogram": hist_panel,
+        "heatmap": heat_panel,
+        "3d": plot3_panel,
+        "3d-polar": polar3_panel,
+        "boxplot": box_panel,
+        "scatter": scatter_panel,
+    }
 
     hist_files_var = tk.StringVar(value="")
     hist_bins_var = tk.StringVar(value="50")
@@ -929,13 +1018,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         nonlocal hist_output_manually_edited
         if hist_output_manually_edited:
             return
-        hist_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_histogram"))
+        hist_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_histogram", plot_value_mode_var.get()))
 
     def _mark_hist_output_manual(*_: object) -> None:
         nonlocal hist_output_manually_edited
-        hist_output_manually_edited = hist_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_histogram")
+        hist_output_manually_edited = hist_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_histogram", plot_value_mode_var.get())
 
     working_csv_var.trace_add("write", _sync_hist_output)
+    plot_value_mode_var.trace_add("write", _sync_hist_output)
     hist_out_var.trace_add("write", _mark_hist_output_manual)
 
     def browse_hist_files() -> None:
@@ -952,14 +1042,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     tk.Entry(hist_panel, textvariable=hist_bins_var, width=18).grid(row=4, column=0, sticky="w", pady=(4, 8))
     tk.Label(hist_panel, text="Output path (blank = no save):").grid(row=5, column=0, sticky="w")
     tk.Entry(hist_panel, textvariable=hist_out_var, width=56).grid(row=6, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
-    tk.Button(hist_panel, text="Browse...", command=lambda: _browse_output_file(hist_out_var, working_csv_var, "_histogram"), width=12).grid(row=6, column=1, sticky="e")
+    tk.Button(hist_panel, text="Browse...", command=lambda: _browse_output_file(hist_out_var, working_csv_var, "_histogram", plot_value_mode_var.get()), width=12).grid(row=6, column=1, sticky="e")
     tk.Label(hist_panel, text="Title:").grid(row=7, column=0, sticky="w")
     tk.Entry(hist_panel, textvariable=hist_title_var, width=56).grid(row=8, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
     tk.Label(hist_panel, text="X-axis label:").grid(row=9, column=0, sticky="w")
     tk.Entry(hist_panel, textvariable=hist_xlabel_var, width=56).grid(row=10, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
     tk.Checkbutton(
         hist_panel,
-        text="Group by repeated point (new group when col 8/9 changes)",
+        text="Group by repeated point (groups depend on axis and theta values)",
         variable=hist_group_by_repeat_point_var,
     ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
@@ -980,8 +1070,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
             messagebox.showerror("Invalid Input", "Number of bins must be at least 1.")
             return
 
-        override_path = _build_plot_value_override(plot_value_mode_var.get(), working_csv)
-        if override_path == "":
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
             return
 
         output_path = hist_out_var.get().strip()
@@ -994,8 +1084,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         args = [*csv_paths, "--bins", str(bins), *output_arg, "--title", title, "--x-label", x_label]
         if hist_group_by_repeat_point_var.get():
             args.append("--group-by-repeat-point")
-        if override_path:
-            args.extend(["--override-tof-file", override_path])
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
         try:
             _launch_script("data/plot_tof_histogram.py", args)
         except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
@@ -1015,13 +1105,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         nonlocal box_output_manually_edited
         if box_output_manually_edited:
             return
-        box_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_boxplot"))
+        box_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_boxplot", plot_value_mode_var.get()))
 
     def _mark_box_output_manual(*_: object) -> None:
         nonlocal box_output_manually_edited
-        box_output_manually_edited = box_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_boxplot")
+        box_output_manually_edited = box_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_boxplot", plot_value_mode_var.get())
 
     working_csv_var.trace_add("write", _sync_box_output)
+    plot_value_mode_var.trace_add("write", _sync_box_output)
     box_out_var.trace_add("write", _mark_box_output_manual)
 
     def browse_box_files() -> None:
@@ -1036,14 +1127,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     tk.Button(box_panel, text="Browse...", width=12, command=browse_box_files).grid(row=2, column=1, sticky="e")
     tk.Label(box_panel, text="Output path (blank = no save):").grid(row=3, column=0, sticky="w")
     tk.Entry(box_panel, textvariable=box_out_var, width=56).grid(row=4, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
-    tk.Button(box_panel, text="Browse...", command=lambda: _browse_output_file(box_out_var, working_csv_var, "_boxplot"), width=12).grid(row=4, column=1, sticky="e")
+    tk.Button(box_panel, text="Browse...", command=lambda: _browse_output_file(box_out_var, working_csv_var, "_boxplot", plot_value_mode_var.get()), width=12).grid(row=4, column=1, sticky="e")
     tk.Label(box_panel, text="Title:").grid(row=5, column=0, sticky="w")
     tk.Entry(box_panel, textvariable=box_title_var, width=56).grid(row=6, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
     tk.Label(box_panel, text="Y-axis label:").grid(row=7, column=0, sticky="w")
     tk.Entry(box_panel, textvariable=box_ylabel_var, width=56).grid(row=8, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
     tk.Checkbutton(
         box_panel,
-        text="Group by repeated point (new group when col 8/9 changes)",
+        text="Group by repeated point (groups depend on axis and theta values)",
         variable=box_group_by_repeat_point_var,
     ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
@@ -1056,8 +1147,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         if extra_text:
             csv_paths.extend(part.strip() for part in extra_text.split(";") if part.strip())
 
-        override_path = _build_plot_value_override(plot_value_mode_var.get(), working_csv)
-        if override_path == "":
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
             return
 
         output_path = box_out_var.get().strip()
@@ -1070,14 +1161,99 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         args = [*csv_paths, *output_arg, "--title", title, "--y-label", y_label]
         if box_group_by_repeat_point_var.get():
             args.append("--group-by-repeat-point")
-        if override_path:
-            args.extend(["--override-tof-file", override_path])
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
         try:
             _launch_script("data/plot_tof_boxplot.py", args)
         except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
             messagebox.showerror("Launch Error", f"Unable to run script:\n{exc}")
 
     tk.Button(box_panel, text="Plot", width=12, command=plot_boxplot).grid(row=10, column=0, sticky="w", pady=(8, 10))
+
+    scatter_files_var = tk.StringVar(value="")
+    scatter_out_var = tk.StringVar(value="")
+    scatter_title_var = tk.StringVar(value="Time of Flight Scatter Plot")
+    scatter_ylabel_var = tk.StringVar(value="Time of Flight (s)")
+    scatter_group_by_repeat_point_var = tk.BooleanVar(value=False)
+    scatter_separate_plots_var = tk.BooleanVar(value=False)
+
+    scatter_output_manually_edited = False
+
+    def _sync_scatter_output(*_: object) -> None:
+        nonlocal scatter_output_manually_edited
+        if scatter_output_manually_edited:
+            return
+        scatter_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_scatter", plot_value_mode_var.get()))
+
+    def _mark_scatter_output_manual(*_: object) -> None:
+        nonlocal scatter_output_manually_edited
+        scatter_output_manually_edited = scatter_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_scatter", plot_value_mode_var.get())
+
+    working_csv_var.trace_add("write", _sync_scatter_output)
+    plot_value_mode_var.trace_add("write", _sync_scatter_output)
+    scatter_out_var.trace_add("write", _mark_scatter_output_manual)
+
+    def browse_scatter_files() -> None:
+        paths = _browse_extra_csvs()
+        if not paths:
+            return
+        scatter_files_var.set("; ".join(paths))
+
+    tk.Label(scatter_panel, text="Scatter Plot", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+    tk.Label(scatter_panel, text="Additional CSVs:").grid(row=1, column=0, sticky="w")
+    tk.Entry(scatter_panel, textvariable=scatter_files_var, width=56).grid(row=2, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Button(scatter_panel, text="Browse...", width=12, command=browse_scatter_files).grid(row=2, column=1, sticky="e")
+    tk.Label(scatter_panel, text="Output path (blank = no save):").grid(row=3, column=0, sticky="w")
+    tk.Entry(scatter_panel, textvariable=scatter_out_var, width=56).grid(row=4, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Button(scatter_panel, text="Browse...", command=lambda: _browse_output_file(scatter_out_var, working_csv_var, "_scatter", plot_value_mode_var.get()), width=12).grid(row=4, column=1, sticky="e")
+    tk.Label(scatter_panel, text="Title:").grid(row=5, column=0, sticky="w")
+    tk.Entry(scatter_panel, textvariable=scatter_title_var, width=56).grid(row=6, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Label(scatter_panel, text="Y-axis label:").grid(row=7, column=0, sticky="w")
+    tk.Entry(scatter_panel, textvariable=scatter_ylabel_var, width=56).grid(row=8, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Checkbutton(
+        scatter_panel,
+        text="Group by repeated point (groups depend on axis and theta values)",
+        variable=scatter_group_by_repeat_point_var,
+    ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    tk.Checkbutton(
+        scatter_panel,
+        text="Separate plots (one figure per dataset instead of combined)",
+        variable=scatter_separate_plots_var,
+    ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+    def plot_scatter() -> None:
+        working_csv = _require_working_csv()
+        if working_csv is None:
+            return
+        csv_paths = [working_csv]
+        extra_text = scatter_files_var.get().strip()
+        if extra_text:
+            csv_paths.extend(part.strip() for part in extra_text.split(";") if part.strip())
+
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
+            return
+
+        output_path = scatter_out_var.get().strip()
+        output_arg: list[str] = []
+        if output_path:
+            output_arg = ["--save", output_path]
+
+        title = scatter_title_var.get().strip() or "Time of Flight Scatter Plot"
+        y_label = scatter_ylabel_var.get().strip() or "Time of Flight (s)"
+        args = [*csv_paths, *output_arg, "--title", title, "--y-label", y_label]
+        if scatter_group_by_repeat_point_var.get():
+            args.append("--group-by-repeat-point")
+        if scatter_separate_plots_var.get():
+            args.append("--separate-plots")
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
+        try:
+            _launch_script("data/plot_tof_scatter.py", args)
+        except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
+            messagebox.showerror("Launch Error", f"Unable to run script:\n{exc}")
+
+    tk.Button(scatter_panel, text="Plot", width=12, command=plot_scatter).grid(row=11, column=0, sticky="w", pady=(8, 10))
 
     heat_files_var = tk.StringVar(value="")
     heat_interpolation_var = tk.BooleanVar(value=True)
@@ -1091,13 +1267,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         nonlocal heat_output_manually_edited
         if heat_output_manually_edited:
             return
-        heat_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_heatmap"))
+        heat_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_heatmap", plot_value_mode_var.get()))
 
     def _mark_heat_output_manual(*_: object) -> None:
         nonlocal heat_output_manually_edited
-        heat_output_manually_edited = heat_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_heatmap")
+        heat_output_manually_edited = heat_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_heatmap", plot_value_mode_var.get())
 
     working_csv_var.trace_add("write", _sync_heat_output)
+    plot_value_mode_var.trace_add("write", _sync_heat_output)
     heat_out_var.trace_add("write", _mark_heat_output_manual)
 
     def browse_heat_files() -> None:
@@ -1113,7 +1290,7 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     tk.Checkbutton(heat_panel, text="Interpolation enabled", variable=heat_interpolation_var).grid(row=3, column=0, sticky="w", pady=(0, 8))
     tk.Label(heat_panel, text="Output path (blank = no save):").grid(row=4, column=0, sticky="w")
     tk.Entry(heat_panel, textvariable=heat_out_var, width=56).grid(row=5, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
-    tk.Button(heat_panel, text="Browse...", command=lambda: _browse_output_file(heat_out_var, working_csv_var, "_heatmap"), width=12).grid(row=5, column=1, sticky="e")
+    tk.Button(heat_panel, text="Browse...", command=lambda: _browse_output_file(heat_out_var, working_csv_var, "_heatmap", plot_value_mode_var.get()), width=12).grid(row=5, column=1, sticky="e")
     tk.Label(heat_panel, text="Title:").grid(row=6, column=0, sticky="w")
     tk.Entry(heat_panel, textvariable=heat_title_var, width=56).grid(row=7, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
     tk.Label(heat_panel, text="Color bar / z-axis label:").grid(row=8, column=0, sticky="w")
@@ -1128,8 +1305,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         if extra_text:
             csv_paths.extend(part.strip() for part in extra_text.split(";") if part.strip())
 
-        override_path = _build_plot_value_override(plot_value_mode_var.get(), working_csv)
-        if override_path == "":
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
             return
 
         output_path = heat_out_var.get().strip()
@@ -1147,8 +1324,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
             "--cbar-label",
             heat_cbar_var.get().strip() or "ToF (s)",
         ]
-        if override_path:
-            args.extend(["--override-tof-file", override_path])
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
         try:
             _launch_script("data/plot_tof_heatmap.py", args)
         except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
@@ -1168,13 +1345,14 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         nonlocal plot3_output_manually_edited
         if plot3_output_manually_edited:
             return
-        plot3_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_3d"))
+        plot3_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_3d", plot_value_mode_var.get()))
 
     def _mark_plot3_output_manual(*_: object) -> None:
         nonlocal plot3_output_manually_edited
-        plot3_output_manually_edited = plot3_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_3d")
+        plot3_output_manually_edited = plot3_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_3d", plot_value_mode_var.get())
 
     working_csv_var.trace_add("write", _sync_plot3_output)
+    plot_value_mode_var.trace_add("write", _sync_plot3_output)
     plot3_out_var.trace_add("write", _mark_plot3_output_manual)
 
     def browse_plot3_files() -> None:
@@ -1191,10 +1369,10 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
     tk.OptionMenu(plot3_panel, plot3_type_var, "scatter", "surface").grid(row=3, column=1, sticky="w", padx=(8, 0))
     tk.Label(plot3_panel, text="Output path (blank = no save):").grid(row=5, column=0, sticky="w")
     tk.Entry(plot3_panel, textvariable=plot3_out_var, width=56).grid(row=6, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
-    tk.Button(plot3_panel, text="Browse...", command=lambda: _browse_output_file(plot3_out_var, working_csv_var, "_3d"), width=12).grid(row=6, column=1, sticky="e")
+    tk.Button(plot3_panel, text="Browse...", command=lambda: _browse_output_file(plot3_out_var, working_csv_var, "_3d", plot_value_mode_var.get()), width=12).grid(row=6, column=1, sticky="e")
     tk.Label(plot3_panel, text="Title:").grid(row=7, column=0, sticky="w")
     tk.Entry(plot3_panel, textvariable=plot3_title_var, width=56).grid(row=8, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
-    tk.Label(plot3_panel, text="Color bar / z-axis label:").grid(row=9, column=0, sticky="w")
+    tk.Label(plot3_panel, text="Color bar label:").grid(row=9, column=0, sticky="w")
     tk.Entry(plot3_panel, textvariable=plot3_cbar_var, width=56).grid(row=10, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
 
     def plot_3d() -> None:
@@ -1206,8 +1384,8 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
         if extra_text:
             csv_paths.extend(part.strip() for part in extra_text.split(";") if part.strip())
 
-        override_path = _build_plot_value_override(plot_value_mode_var.get(), working_csv)
-        if override_path == "":
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
             return
 
         output_path = plot3_out_var.get().strip()
@@ -1227,14 +1405,107 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
             "--z-label",
             plot3_cbar_var.get().strip() or "Time of Flight (s)",
         ]
-        if override_path:
-            args.extend(["--override-tof-file", override_path])
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
         try:
             _launch_script("data/plot_tof_3d.py", args)
         except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
             messagebox.showerror("Launch Error", f"Unable to run script:\n{exc}")
 
     tk.Button(plot3_panel, text="Plot", width=12, command=plot_3d).grid(row=11, column=0, sticky="w", pady=(8, 10))
+
+    polar3_files_var = tk.StringVar(value="")
+    polar3_radius_var = tk.StringVar(value="0.05")
+    polar3_out_var = tk.StringVar(value="")
+    polar3_title_var = tk.StringVar(value="ToF 3D Polar Plot")
+    polar3_cbar_var = tk.StringVar(value="Time of Flight (s)")
+    polar3_type_var = tk.StringVar(value="scatter")
+
+    polar3_output_manually_edited = False
+
+    def _sync_polar3_output(*_: object) -> None:
+        nonlocal polar3_output_manually_edited
+        if polar3_output_manually_edited:
+            return
+        polar3_out_var.set(_plot_output_default(working_csv_var.get().strip(), "_polar_3d", plot_value_mode_var.get()))
+
+    def _mark_polar3_output_manual(*_: object) -> None:
+        nonlocal polar3_output_manually_edited
+        polar3_output_manually_edited = polar3_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), "_polar_3d", plot_value_mode_var.get())
+
+    working_csv_var.trace_add("write", _sync_polar3_output)
+    plot_value_mode_var.trace_add("write", _sync_polar3_output)
+    polar3_out_var.trace_add("write", _mark_polar3_output_manual)
+
+    def browse_polar3_files() -> None:
+        paths = _browse_extra_csvs()
+        if not paths:
+            return
+        polar3_files_var.set("; ".join(paths))
+
+    tk.Label(polar3_panel, text="3D Polar Plot", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+    tk.Label(polar3_panel, text="Additional CSVs:").grid(row=1, column=0, sticky="w")
+    tk.Entry(polar3_panel, textvariable=polar3_files_var, width=56).grid(row=2, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Button(polar3_panel, text="Browse...", width=12, command=browse_polar3_files).grid(row=2, column=1, sticky="e")
+    tk.Label(polar3_panel, text="Radius (m):").grid(row=3, column=0, sticky="w")
+    tk.Entry(polar3_panel, textvariable=polar3_radius_var, width=20).grid(row=3, column=1, sticky="w", padx=(8, 0))
+    tk.Label(polar3_panel, text="Plot type:").grid(row=4, column=0, sticky="w")
+    tk.OptionMenu(polar3_panel, polar3_type_var, "scatter", "surface").grid(row=4, column=1, sticky="w", padx=(8, 0))
+    tk.Label(polar3_panel, text="Output path (blank = no save):").grid(row=5, column=0, sticky="w")
+    tk.Entry(polar3_panel, textvariable=polar3_out_var, width=56).grid(row=6, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Button(polar3_panel, text="Browse...", command=lambda: _browse_output_file(polar3_out_var, working_csv_var, "_polar_3d", plot_value_mode_var.get()), width=12).grid(row=6, column=1, sticky="e")
+    tk.Label(polar3_panel, text="Title:").grid(row=7, column=0, sticky="w")
+    tk.Entry(polar3_panel, textvariable=polar3_title_var, width=56).grid(row=8, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+    tk.Label(polar3_panel, text="Color bar label:").grid(row=9, column=0, sticky="w")
+    tk.Entry(polar3_panel, textvariable=polar3_cbar_var, width=56).grid(row=10, column=0, sticky="we", padx=(0, 8), pady=(4, 8))
+
+    def plot_polar_3d() -> None:
+        working_csv = _require_working_csv()
+        if working_csv is None:
+            return
+        csv_paths = [working_csv]
+        extra_text = polar3_files_var.get().strip()
+        if extra_text:
+            csv_paths.extend(part.strip() for part in extra_text.split(";") if part.strip())
+
+        radius_text = polar3_radius_var.get().strip()
+        try:
+            radius_value = float(radius_text)
+        except ValueError:
+            messagebox.showerror("Invalid Radius", "Please enter a numeric radius in metres.")
+            return
+
+        override_paths = _build_plot_value_overrides(plot_value_mode_var.get(), csv_paths)
+        if override_paths is None:
+            return
+
+        output_path = polar3_out_var.get().strip()
+        output_arg: list[str] = []
+        if output_path:
+            output_arg = ["--save", output_path]
+
+        args = [
+            *csv_paths,
+            "--radius",
+            str(radius_value),
+            "--plot-type",
+            polar3_type_var.get(),
+            *output_arg,
+            "--title-prefix",
+            polar3_title_var.get().strip() or "ToF 3D Polar Plot",
+            "--cbar-label",
+            polar3_cbar_var.get().strip() or "Time of Flight (s)",
+        ]
+        if plot_value_mode_var.get() == "Thickness":
+            args.append("--dual-thickness")
+        if override_paths[0] is not None:
+            args.extend(["--override-tof-file", *override_paths])
+        try:
+            _launch_script("data/plot_tof_polar_3d.py", args)
+        except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
+            messagebox.showerror("Launch Error", f"Unable to run script:\n{exc}")
+
+    tk.Button(polar3_panel, text="Plot", width=12, command=plot_polar_3d).grid(row=11, column=0, sticky="w", pady=(8, 10))
 
     def show_panel(kind: str) -> None:
         for name, panel in panels.items():
@@ -1245,6 +1516,168 @@ def _build_plots_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> No
 
     show_panel(plot_kind_var.get())
     plot_kind_var.trace_add("write", lambda *_: show_panel(plot_kind_var.get()))
+
+
+def _build_cross_section_plotting_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> None:
+    section = tk.LabelFrame(parent, text="Cross-Section Plotting", padx=12, pady=10)
+    section.pack(fill="x", pady=(0, 14))
+
+    def _require_working_csv() -> str | None:
+        working_csv = working_csv_var.get().strip()
+        if not working_csv:
+            messagebox.showerror("No Working CSV", "Please set a working CSV in the CSV Paths section first.")
+            return None
+        return working_csv
+
+    fixed_value_type_var = tk.StringVar(value="theta")
+    fixed_value_var = tk.StringVar(value="0")
+
+    plot_value_mode_var = tk.StringVar(value="ToF")
+    speed_estimate_var = tk.StringVar(value="1500")
+    thickness_estimate_var = tk.StringVar(value="0.01")
+    second_csv_var = tk.StringVar(value="")
+    cross_out_var = tk.StringVar(value="")
+
+    def _plot_output_default(working_csv: str, value_mode: str) -> str:
+        if not working_csv:
+            return ""
+        stem = Path(working_csv).stem
+        value_suffix = _plot_value_type_suffix(value_mode)
+        return str(PROCESSED_DIR / "plots" / f"{stem}_cross_section_{value_suffix}.png")
+
+    cross_output_manually_edited = False
+
+    def _sync_cross_output(*_: object) -> None:
+        nonlocal cross_output_manually_edited
+        if cross_output_manually_edited:
+            return
+        cross_out_var.set(_plot_output_default(working_csv_var.get().strip(), plot_value_mode_var.get()))
+
+    def _mark_cross_output_manual(*_: object) -> None:
+        nonlocal cross_output_manually_edited
+        cross_output_manually_edited = cross_out_var.get().strip() != _plot_output_default(working_csv_var.get().strip(), plot_value_mode_var.get())
+
+    working_csv_var.trace_add("write", _sync_cross_output)
+    plot_value_mode_var.trace_add("write", _sync_cross_output)
+    cross_out_var.trace_add("write", _mark_cross_output_manual)
+
+    def browse_cross_output() -> None:
+        output_dir = PROCESSED_DIR / "plots"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        folder = filedialog.askdirectory(
+            title="Select output folder",
+            initialdir=str(output_dir),
+        )
+        if not folder:
+            return
+        working_csv = working_csv_var.get().strip()
+        stem = Path(working_csv).stem if working_csv else "plot"
+        value_suffix = _plot_value_type_suffix(plot_value_mode_var.get())
+        cross_out_var.set(str(Path(folder) / f"{stem}_cross_section_{value_suffix}.png"))
+
+    tk.Label(section, text="Fixed Value Type:").grid(row=0, column=0, sticky="w")
+    tk.OptionMenu(section, fixed_value_type_var, "theta", "axis").grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+    tk.Label(section, text="Fixed Value:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+    tk.Entry(section, textvariable=fixed_value_var, width=20).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+
+    tk.Label(section, text="Plotted Values:").grid(row=2, column=0, sticky="w", pady=(10, 4))
+    tk.OptionMenu(section, plot_value_mode_var, "ToF", "Thickness", "Speed", "Errors").grid(
+        row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 4)
+    )
+
+    speed_estimate_label = tk.Label(section, text="Speed Estimate (m/s):")
+    speed_estimate_entry = tk.Entry(section, textvariable=speed_estimate_var, width=20)
+    thickness_estimate_label = tk.Label(section, text="Thickness Estimate (m):")
+    thickness_estimate_entry = tk.Entry(section, textvariable=thickness_estimate_var, width=20)
+    second_csv_label = tk.Label(section, text="Second Input CSV:")
+    second_csv_entry = tk.Entry(section, textvariable=second_csv_var, width=40)
+    second_csv_browse = tk.Button(section, text="Browse...", width=12)
+
+    def _toggle_value_inputs(*_: object) -> None:
+        kind = plot_value_mode_var.get()
+        speed_estimate_label.grid_remove()
+        speed_estimate_entry.grid_remove()
+        thickness_estimate_label.grid_remove()
+        thickness_estimate_entry.grid_remove()
+        second_csv_label.grid_remove()
+        second_csv_entry.grid_remove()
+        second_csv_browse.grid_remove()
+
+        if kind == "Thickness":
+            speed_estimate_label.grid(row=3, column=0, sticky="w", pady=(0, 6))
+            speed_estimate_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(0, 6))
+        elif kind == "Speed":
+            thickness_estimate_label.grid(row=3, column=0, sticky="w", pady=(0, 6))
+            thickness_estimate_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(0, 6))
+        elif kind == "Errors":
+            second_csv_label.grid(row=3, column=0, sticky="w", pady=(0, 6))
+            second_csv_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(0, 6))
+            second_csv_browse.grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
+
+    def browse_second_csv() -> None:
+        path = filedialog.askopenfilename(
+            title="Second input CSV for error plot",
+            initialdir=str(PROCESSED_DIR if PROCESSED_DIR.exists() else PROJECT_ROOT),
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            second_csv_var.set(path)
+
+    second_csv_browse.configure(command=browse_second_csv)
+    plot_value_mode_var.trace_add("write", _toggle_value_inputs)
+    _toggle_value_inputs()
+
+    tk.Label(section, text="Output path (blank = no save):").grid(row=4, column=0, sticky="w", pady=(10, 0))
+    tk.Entry(section, textvariable=cross_out_var, width=56).grid(
+        row=5, column=0, columnspan=2, sticky="we", padx=(0, 8), pady=(4, 8)
+    )
+    tk.Button(section, text="Browse...", width=12, command=browse_cross_output).grid(row=5, column=2, sticky="w")
+
+    def plot_cross_section() -> None:
+        working_csv = _require_working_csv()
+        if working_csv is None:
+            return
+
+        try:
+            fixed_value = float(fixed_value_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Fixed Value must be numeric.")
+            return
+
+        try:
+            override_path = _compute_plot_value_override(
+                plot_value_mode_var.get(),
+                working_csv,
+                speed_estimate_var.get(),
+                thickness_estimate_var.get(),
+                second_csv_var.get().strip(),
+            )
+        except _PlotValueError as exc:
+            messagebox.showerror(exc.title, exc.message)
+            return
+
+        args = [
+            working_csv,
+            "--fixed-value-type",
+            fixed_value_type_var.get(),
+            "--fixed-value",
+            str(fixed_value),
+            "--y-label",
+            plot_value_mode_var.get() if plot_value_mode_var.get() != "ToF" else "Time of Flight (s)",
+        ]
+        output_path = cross_out_var.get().strip()
+        if output_path:
+            args.extend(["--save", output_path])
+        if override_path:
+            args.extend(["--override-tof-file", override_path])
+
+        try:
+            _launch_script("data/plot_closest_fixed_value.py", args)
+        except Exception as exc:  # noqa: BLE001 - propagate any launcher failure to the GUI error dialog.
+            messagebox.showerror("Launch Error", f"Unable to run script:\n{exc}")
+
+    tk.Button(section, text="Plot", width=12, command=plot_cross_section).grid(row=6, column=0, sticky="w", pady=(10, 0))
 
 
 def _build_tof_calculation_methods_section(parent: tk.Widget, working_csv_var: tk.StringVar) -> None:
@@ -1605,7 +2038,7 @@ def _build_repeatability_errors_section(parent: tk.Widget, working_csv_var: tk.S
 
     tk.Label(
         section,
-        text="Grouping uses repeated-point changes: a new group starts when column 8 or 9 changes.",
+        text="Grouping uses repeated-point changes: groups depend on axis and theta values.",
         fg="gray",
         justify="left",
         wraplength=430,
@@ -1759,6 +2192,7 @@ def main() -> None:
     _build_filters_section(left_panel, input_csv_var, working_csv_var, output_csv_var)
     _build_signal_plotting_section(left_panel, working_csv_var)
     _build_plots_section(right_panel, working_csv_var)
+    _build_cross_section_plotting_section(right_panel, working_csv_var)
     _build_tof_calculation_methods_section(tof_panel, working_csv_var)
     _build_peak_finding_variables_section(tof_panel)
     _build_repeatability_errors_section(tof_panel, working_csv_var)

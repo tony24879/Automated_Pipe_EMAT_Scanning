@@ -204,6 +204,50 @@ def _show_calibrate_dialog(parent: tk.Tk) -> None:
 	dialog.bind("<Escape>", lambda _event: dialog.destroy())
 
 
+def _show_one_point_capture_dialog(parent: tk.Tk) -> None:
+	dialog = tk.Toplevel(parent)
+	dialog.title("One Point Capture")
+	dialog.resizable(False, False)
+	dialog.transient(parent)
+	dialog.grab_set()
+
+	frame = tk.Frame(dialog, padx=14, pady=12)
+	frame.pack(fill="both", expand=True)
+
+	tk.Label(frame, text="Number of EMAT captures:").grid(row=0, column=0, sticky="w")
+	captures_var = tk.StringVar(value="1")
+	captures_entry = tk.Entry(frame, textvariable=captures_var, width=14)
+	captures_entry.grid(row=1, column=0, sticky="we", pady=(4, 10))
+	captures_entry.focus_set()
+
+	buttons = tk.Frame(frame)
+	buttons.grid(row=2, column=0, sticky="e")
+
+	def on_run() -> None:
+		raw_value = captures_var.get().strip()
+		try:
+			num_captures = int(raw_value)
+		except ValueError:
+			messagebox.showerror("Invalid Input", "Number of captures must be an integer.", parent=dialog)
+			return
+		if num_captures <= 0:
+			messagebox.showerror("Invalid Input", "Number of captures must be greater than 0.", parent=dialog)
+			return
+
+		try:
+			_launch_script("scripts/one_point_capture.py", ["--num-captures", str(num_captures)])
+		except Exception as exc:  # noqa: BLE001 - surface any launch failure to the GUI.
+			messagebox.showerror("Launch Error", f"Unable to start one point capture:\n{exc}", parent=dialog)
+			return
+		dialog.destroy()
+
+	tk.Button(buttons, text="Cancel", width=12, command=dialog.destroy).pack(side="left", padx=(0, 8))
+	tk.Button(buttons, text="Run", width=12, command=on_run).pack(side="left")
+
+	dialog.bind("<Return>", lambda _event: on_run())
+	dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
+
 def _show_scan_dialog(parent: tk.Tk) -> None:
 	dialog = tk.Toplevel(parent)
 	dialog.title("Run Scan")
@@ -326,6 +370,7 @@ def main() -> None:
 	tk.Label(frame, text="Choose an action", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
 	tk.Button(frame, text="Calibrate", width=22, command=lambda: _show_calibrate_dialog(root)).pack(pady=(0, 8))
 	tk.Button(frame, text="Run Scan", width=22, command=lambda: _show_scan_dialog(root)).pack(pady=(0, 8))
+	tk.Button(frame, text="One Point Capture", width=22, command=lambda: _show_one_point_capture_dialog(root)).pack(pady=(0, 8))
 	tk.Button(frame, text="Exit", width=22, command=root.destroy).pack()
 
 	manual_mode_var = tk.BooleanVar(value=False)

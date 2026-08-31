@@ -99,8 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--override-tof-file",
         type=Path,
+        nargs="+",
         default=None,
-        help="Optional CSV/text file containing override TOF values for the working CSV.",
+        help=(
+            "Optional CSV/text file(s) containing override TOF values, one per input CSV "
+            "(in the same order)."
+        ),
     )
     parser.add_argument(
         "--interpolation",
@@ -423,9 +427,18 @@ def main() -> None:
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    override_tof_values = load_override_tof_values(args.override_tof_file) if args.override_tof_file is not None else None
+    if args.override_tof_file is not None and len(args.override_tof_file) != len(csv_files):
+        raise ValueError(
+            "Number of --override-tof-file entries must match the number of input CSV files."
+        )
+    override_values_by_csv: list[np.ndarray | None] = (
+        [load_override_tof_values(path) for path in args.override_tof_file]
+        if args.override_tof_file is not None
+        else [None] * len(csv_files)
+    )
+
     datasets: list[tuple[Path, np.ndarray, np.ndarray, np.ndarray]] = []
-    for csv_path in csv_files:
+    for csv_path, override_tof_values in zip(csv_files, override_values_by_csv):
         theta, x, tof = load_points(
             csv_path=csv_path,
             theta_col=args.theta_col,

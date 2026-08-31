@@ -21,7 +21,7 @@ from scipy.signal import find_peaks
 # Match existing TOF peak logic in emat/sync_logger.py and emat/live_plot.py.
 SKIP_SAMPLES = 200 #150
 MIN_PEAK_DISTANCE = 250 #280
-MIN_PROMINENCE = 30 #500
+MIN_PROMINENCE = 100 #500
 DEFAULT_SIGNAL_START_COL = 11  # 1-based
 
 
@@ -238,10 +238,7 @@ def find_two_signal_peaks(y: np.ndarray) -> list[tuple[int, str, float]]:
     selected: list[tuple[int, str, float]] = [(first_peak_index, first_source, first_peak_value)]
     same_polarity_peaks = positive_peaks if first_source == "normal" else negative_peaks
     if len(same_polarity_peaks) > 1:
-        second_peak = max(
-            same_polarity_peaks[1:],
-            key=lambda item: abs(item[2]),
-        )
+        second_peak = same_polarity_peaks[1]
         selected.append((second_peak[0], second_peak[1], second_peak[2]))
 
     return selected[:2]

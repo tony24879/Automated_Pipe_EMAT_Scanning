@@ -2,7 +2,8 @@
 
 Grouping rule:
 - Use rows with numeric TOF values in column 10 (1-based).
-- Start a new group whenever column 8 or 9 (1-based) changes vs previous usable row.
+- Group rows by their (column 8, column 9) (1-based) value combination, regardless of
+  whether that combination appears in consecutive rows.
 """
 
 from __future__ import annotations
@@ -45,30 +46,56 @@ def group_rows_by_repeat_point(
     key_cols: Iterable[int] = (8, 9),
     skip_header: bool = True,
 ) -> list[list[list[str]]]:
-    """Group rows by consecutive runs of equal (col8, col9) among numeric-TOF rows."""
+    """Group rows by their (col8, col9) value combination among numeric-TOF rows."""
     data_rows = rows[1:] if skip_header else rows
 
-    groups: list[list[list[str]]] = []
-    current_group: list[list[str]] = []
-    previous_key: tuple[str, ...] | None = None
+    groups_by_key: dict[tuple[str, ...], list[list[str]]] = {}
+    key_order: list[tuple[str, ...]] = []
 
     for row in data_rows:
         if parse_numeric_tof(row, tof_col=tof_col) is None:
             continue
 
         current_key = row_group_key(row, key_cols=key_cols)
-        if previous_key is not None and current_key != previous_key:
-            if current_group:
-                groups.append(current_group)
-            current_group = []
+        if current_key not in groups_by_key:
+            groups_by_key[current_key] = []
+            key_order.append(current_key)
 
-        current_group.append(row)
-        previous_key = current_key
+        groups_by_key[current_key].append(row)
 
-    if current_group:
-        groups.append(current_group)
+    return [groups_by_key[key] for key in key_order]
 
-    return groups
+
+def group_row_indices_by_repeat_point(
+    rows: list[list[str]],
+    tof_col: int = 10,
+    key_cols: Iterable[int] = (8, 9),
+    skip_header: bool = True,
+) -> list[list[int]]:
+    """Group indices into the numeric-TOF row sequence (original order) by (col8, col9).
+
+    Index i in the returned groups refers to the i-th row (in original file order) that has
+    a numeric TOF value - i.e. the same order external override-value arrays are built in.
+    """
+    data_rows = rows[1:] if skip_header else rows
+
+    indices_by_key: dict[tuple[str, ...], list[int]] = {}
+    key_order: list[tuple[str, ...]] = []
+    numeric_row_index = 0
+
+    for row in data_rows:
+        if parse_numeric_tof(row, tof_col=tof_col) is None:
+            continue
+
+        current_key = row_group_key(row, key_cols=key_cols)
+        if current_key not in indices_by_key:
+            indices_by_key[current_key] = []
+            key_order.append(current_key)
+
+        indices_by_key[current_key].append(numeric_row_index)
+        numeric_row_index += 1
+
+    return [indices_by_key[key] for key in key_order]
 
 
 def grouped_tof_values(

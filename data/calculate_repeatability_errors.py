@@ -13,9 +13,17 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from repeat_point_grouping import grouped_tof_values, group_rows_by_repeat_point
+    from repeat_point_grouping import (
+        grouped_tof_values,
+        group_rows_by_repeat_point,
+        group_row_indices_by_repeat_point,
+    )
 except ModuleNotFoundError:
-    from data.repeat_point_grouping import grouped_tof_values, group_rows_by_repeat_point
+    from data.repeat_point_grouping import (
+        grouped_tof_values,
+        group_rows_by_repeat_point,
+        group_row_indices_by_repeat_point,
+    )
 
 RAW_DIR = Path(__file__).resolve().parent / "raw"
 TARGET_TOF_COL = 10
@@ -82,25 +90,19 @@ def get_rows(csv_path: Path) -> list[list[str]]:
         return [row for row in reader if row]
 
 
-def _split_override_by_group_lengths(override_values: list[float], group_lengths: list[int]) -> list[list[float]]:
-    expected_count = sum(group_lengths)
+def _split_override_by_group_indices(override_values: list[float], group_indices: list[list[int]]) -> list[list[float]]:
+    expected_count = sum(len(indices) for indices in group_indices)
     if len(override_values) != expected_count:
         raise ValueError(
             "Override values length does not match grouped row count. "
             f"Expected {expected_count}, got {len(override_values)}."
         )
 
-    groups: list[list[float]] = []
-    cursor = 0
-    for length in group_lengths:
-        groups.append([float(value) for value in override_values[cursor : cursor + length]])
-        cursor += length
-    return groups
+    return [[float(override_values[i]) for i in indices] for indices in group_indices]
 
 
-def _group_lengths(rows: list[list[str]]) -> list[int]:
-    grouped_rows = group_rows_by_repeat_point(rows, tof_col=TARGET_TOF_COL, key_cols=(8, 9), skip_header=True)
-    return [len(group) for group in grouped_rows if group]
+def _group_row_indices(rows: list[list[str]]) -> list[list[int]]:
+    return group_row_indices_by_repeat_point(rows, tof_col=TARGET_TOF_COL, key_cols=(8, 9), skip_header=True)
 
 
 def _grouped_tof(rows: list[list[str]]) -> list[list[float]]:
@@ -131,10 +133,10 @@ def _build_groups_for_source(
         raise ValueError("Override values are only supported with source mode ToF.")
 
     if override_values is not None:
-        lengths = _group_lengths(rows)
-        if not lengths:
+        group_indices = _group_row_indices(rows)
+        if not group_indices:
             raise ValueError("No grouped numeric TOF rows were found for override values.")
-        return _split_override_by_group_lengths(override_values, lengths)
+        return _split_override_by_group_indices(override_values, group_indices)
 
     groups = _grouped_tof(rows)
     if source_mode == "ToF":

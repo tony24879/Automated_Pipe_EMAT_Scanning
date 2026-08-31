@@ -1,9 +1,9 @@
-"""Plot a 3D Time of Flight view from a scan CSV.
+"""Plot a 3D polar (r, theta, z) Time of Flight view from a scan CSV.
 
-Expected default columns (1-based):
-- 8: Theta (deg)
-- 9: Axis Position (mm)
-- 10: Time of Flight (s)
+Each data point uses a fixed input radius, with:
+- theta (column 8, 1-based): angle around the polar axis (deg)
+- z (column 9, 1-based): axis position (mm)
+- color scale (column 10, 1-based): Time of Flight (s)
 """
 
 from __future__ import annotations
@@ -12,7 +12,9 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 import numpy as np
+from matplotlib.colors import Normalize
 
 try:
     from data.plot_tof_heatmap import average_duplicate_points, load_points
@@ -27,12 +29,18 @@ def _path_or_none(value: str | None) -> Path | None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot a 3D Time of Flight view from a CSV file.")
+    parser = argparse.ArgumentParser(description="Plot a 3D polar (r, theta, z) Time of Flight view from a CSV file.")
     parser.add_argument(
         "csv_files",
         type=Path,
         nargs="+",
         help="Path(s) to one or more CSV files (for example: data/raw/sync_scan_20260701_121153.csv)",
+    )
+    parser.add_argument(
+        "--radius",
+        type=float,
+        required=True,
+        help="Fixed radius (m) used for every data point on the r axis.",
     )
     parser.add_argument(
         "--theta-col",
@@ -41,10 +49,10 @@ def parse_args() -> argparse.Namespace:
         help="1-based column index for theta in degrees (default: 8)",
     )
     parser.add_argument(
-        "--x-col",
+        "--z-col",
         type=int,
         default=9,
-        help="1-based column index for x axis position in mm (default: 9)",
+        help="1-based column index for the z axis position in mm (default: 9)",
     )
     parser.add_argument(
         "--tof-col",
@@ -91,20 +99,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--title-prefix",
         type=str,
-        default="ToF 3D Plot",
+        default="ToF 3D Polar Plot",
         help="Title text to place before the CSV filename.",
     )
     parser.add_argument(
         "--cbar-label",
         type=str,
         default="Time of Flight (s)",
-        help="Label for the color bar and z-axis.",
-    )
-    parser.add_argument(
-        "--z-label",
-        type=str,
-        default=None,
-        help="Optional override for the z-axis label. Defaults to the color bar label.",
+        help="Label for the color bar.",
     )
     parser.add_argument(
         "--override-tof-file",
@@ -116,18 +118,34 @@ def parse_args() -> argparse.Namespace:
             "(in the same order)."
         ),
     )
+    parser.add_argument(
+        "--dual-thickness",
+        action="store_true",
+        help=(
+            "Also plot the points in grey at the fixed radius, then plot the colored points "
+            "at (radius - value) using the ToF/thickness values."
+        ),
+    )
     return parser.parse_args()
 
 
 def default_export_path(csv_path: Path, plot_type: str) -> Path:
     plots_dir = Path(__file__).resolve().parent / "processed" / "plots"
-    return plots_dir / f"{csv_path.stem}_{plot_type}_3d.png"
+    return plots_dir / f"{csv_path.stem}_{plot_type}_polar_3d.png"
 
 
-def plot_3d(
+def polar_to_cartesian(radius: float, theta_deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    theta_rad = np.deg2rad(theta_deg)
+    return radius * np.cos(theta_rad), radius * np.sin(theta_rad)
+
+
+def plot_polar_3d(
     x: np.ndarray,
-    theta: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
     tof: np.ndarray,
+    theta: np.ndarray,
+    radius: float,
     plot_type: str,
     marker_size: float,
     alpha: float,
@@ -138,28 +156,61 @@ def plot_3d(
     vmax: float,
     title: str,
     cbar_label: str,
-    z_label: str,
+    dual_thickness: bool = False,
 ) -> None:
     fig = plt.figure(figsize=(10, 7))
     axis = fig.add_subplot(111, projection="3d")
 
+    if dual_thickness:
+        # Background layer: the undeformed points at the fixed radius, with no color data.
+        grey_y, grey_z = polar_to_cartesian(radius, theta)
+        if plot_type == "surface":
+            grey_triangulation = mtri.Triangulation(x, theta)
+            axis.plot_trisurf(
+                grey_triangulation,
+                grey_y,
+                grey_z,
+                color="lightgray",
+                linewidth=0.15,
+                antialiased=True,
+                alpha=alpha * 0.5,
+            )
+        else:
+            axis.scatter(
+                x,
+                grey_y,
+                grey_z,
+                color="lightgray",
+                s=marker_size,
+                alpha=alpha * 0.5,
+                depthshade=True,
+            )
+
     if plot_type == "surface":
+        # Triangulate on (axis position, theta), the natural scan grid, rather than the
+        # projected cartesian coordinates, then color each face by its averaged ToF.
+        triangulation = mtri.Triangulation(x, theta)
         artist = axis.plot_trisurf(
-            x,
-            theta,
-            tof,
+            triangulation,
+            y,
+            z,
             cmap="viridis",
             vmin=vmin,
             vmax=vmax,
             linewidth=0.15,
             antialiased=True,
-            alpha=alpha,
         )
+        face_tof = tof[triangulation.triangles].mean(axis=1)
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        face_colors = plt.get_cmap("viridis")(norm(face_tof))
+        face_colors[:, 3] = alpha
+        artist.set_facecolor(face_colors)
+        artist.set_array(face_tof)
     else:
         artist = axis.scatter(
             x,
-            theta,
-            tof,
+            y,
+            z,
             c=tof,
             cmap="viridis",
             s=marker_size,
@@ -170,10 +221,13 @@ def plot_3d(
         )
 
     axis.set_xlabel("axis position (mm)")
-    axis.set_ylabel("theta (deg)")
-    axis.set_zlabel(z_label)
+    axis.set_ylabel("y (m)")
+    axis.set_zlabel("z (m)")
     axis.set_title(title)
     axis.view_init(elev=elev, azim=azim)
+
+    axis.set_ylim(-radius, radius)
+    axis.set_zlim(0, 2 * radius)
 
     fig.colorbar(artist, ax=axis, pad=0.1, shrink=0.75, label=cbar_label)
     fig.tight_layout()
@@ -181,7 +235,7 @@ def plot_3d(
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=200)
-        print(f"Saved 3D plot image to: {save_path}")
+        print(f"Saved 3D polar plot image to: {save_path}")
 
     plt.show()
 
@@ -210,29 +264,29 @@ def main() -> None:
 
     datasets: list[tuple[Path, np.ndarray, np.ndarray, np.ndarray]] = []
     for csv_path, override_tof_values in zip(csv_files, override_values_by_csv):
-        theta, x, tof = load_points(
+        theta, z, tof = load_points(
             csv_path=csv_path,
             theta_col=args.theta_col,
-            x_col=args.x_col,
+            x_col=args.z_col,
             tof_col=args.tof_col,
             override_tof_values=override_tof_values,
         )
-        theta, x, tof = average_duplicate_points(theta=theta, x=x, tof=tof)
-        datasets.append((csv_path, theta, x, tof))
+        theta, z, tof = average_duplicate_points(theta=theta, x=z, tof=tof)
+        datasets.append((csv_path, theta, z, tof))
 
     global_min = float(min(np.min(tof) for _, _, _, tof in datasets))
     global_max = float(max(np.max(tof) for _, _, _, tof in datasets))
     if np.isclose(global_min, global_max):
         global_max = global_min + 1e-12
 
-    for csv_path, theta, x, tof in datasets:
+    for csv_path, theta, z, tof in datasets:
         if args.save is None:
             save_path = None
         elif len(datasets) == 1 and args.save.suffix:
             save_path = args.save
         else:
             save_dir = args.save if (not args.save.suffix or args.save.is_dir()) else args.save.parent
-            save_path = save_dir / f"{csv_path.stem}_{args.plot_type}_3d.png"
+            save_path = save_dir / f"{csv_path.stem}_{args.plot_type}_polar_3d.png"
 
         title_prefix = args.title_prefix.strip()
         if title_prefix:
@@ -240,11 +294,16 @@ def main() -> None:
         else:
             title = csv_path.stem
 
-        color_label = args.z_label.strip() if args.z_label else args.cbar_label.strip()
-        plot_3d(
-            x=x,
-            theta=theta,
+        y, z_polar = polar_to_cartesian(
+            args.radius - tof if args.dual_thickness else args.radius, theta
+        )
+        plot_polar_3d(
+            x=z,
+            y=y,
+            z=z_polar,
             tof=tof,
+            theta=theta,
+            radius=args.radius,
             plot_type=args.plot_type,
             marker_size=args.marker_size,
             alpha=args.alpha,
@@ -254,8 +313,8 @@ def main() -> None:
             vmin=global_min,
             vmax=global_max,
             title=title,
-            cbar_label=color_label,
-            z_label=color_label,
+            cbar_label=args.cbar_label.strip(),
+            dual_thickness=args.dual_thickness,
         )
 
 

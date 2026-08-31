@@ -4,7 +4,7 @@
 ROBOT_IP = "192.168.1.184"
 
 # TCP/tool frame offset: [x, y, z, roll, pitch, yaw].
-TCP_OFFSET = [0, 0, 106.5, 0, 0, -90]
+TCP_OFFSET = [0, 0, 106.5, 0, 0, 0]
 #TCP_OFFSET = [0, 0, 102.6, 0, 0, 0]
 #TCP_OFFSET = [0, 0, 90, 0, 0, 0]
 #TCP_OFFSET = [0, -40, 77.4, 0, 0, 0]
